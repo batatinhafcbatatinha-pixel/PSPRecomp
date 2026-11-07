@@ -314,7 +314,12 @@ int main(int argc, char **argv) {
                 }
             }).detach();
         }
-        runtime.run(elf.runtime_entry(), max_dispatches);
+        try {
+            runtime.run(elf.runtime_entry(), max_dispatches);
+        } catch (const std::exception &e) {
+            runtime.stop(std::string("exception: ") + e.what()); // PSPRECOMP_DUMP_ON_STOP also on guest faults
+            throw;
+        }
         const bool shutdown_diag = std::getenv("PSPRECOMP_SHUTDOWN_DIAG") != nullptr;
         if (shutdown_diag) std::cerr << "[shutdown] runtime-run-returned\n";
         std::cout << "Runtime stopped: " << runtime.stop_reason() << "\n";
