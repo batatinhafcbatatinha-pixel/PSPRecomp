@@ -1,0 +1,31 @@
+{
+  "recomp": "PSPRecomp",
+  "repo": "batatinhafcbatatinha-pixel/PSPRecomp",
+  "branch": "main",
+  "games_dir": "profiles",
+  "setup": "tools/port-installer/setup/setup.ps1",
+  "tools_dir": ".local/tools",
+  "exe": "build/native/bin/CTWNative.exe",
+  "ini": "build/native/bin/CTWNative.ini",
+  "section": "opcoes",
+  "vulkan_dir": null,
+  "deps": {
+    "buildtools_gb": 7,
+    "python_gb": 0.1,
+    "tools": [
+      {
+        "id": "cmake",
+        "name": "CMake 3.31.12",
+        "check": ".local/tools/cmake-3.31.12/bin/cmake.exe",
+        "gb": 0.1
+      },
+      {
+        "id": "ninja",
+        "name": "Ninja 1.13.2",
+        "check": ".local/tools/ninja-1.13.2/ninja.exe",
+        "gb": 0.01
+      }
+    ]
+  },
+  "groups": []
+}

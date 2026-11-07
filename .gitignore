@@ -50,3 +50,13 @@ SAVEDATA/
 # Python
 __pycache__/
 *.pyc
+
+# Per-game install and build (launcher / setup.ps1): game files, builds, logs, downloaded FFmpeg libraries
+/.local/
+/profiles/*/game_files/
+/profiles/*/build/
+/profiles/*/setup-log.txt
+/profiles/*/game-install-report.json
+/profiles/*/.game-install.lock
+/profiles/*/third_party/ffmpeg/lib/
+/profiles/*/third_party/ffmpeg/bin/

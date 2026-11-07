@@ -1,0 +1,65 @@
+{
+  "game": "Grand Theft Auto: Chinatown Wars",
+  "disc": "PSP, USA (ULUS-10490)",
+  "play": "Play-CTW.cmd",
+  "exe": "build/native/bin/CTWNative.exe",
+  "disk_gb": 15,
+  "download_gb": 1,
+  "minutes": "30-90",
+  "tools": [
+    "cmake",
+    "ninja"
+  ],
+  "gb_per_job": 3,
+  "steps": [
+    {
+      "name": "Build the PSPRecomp tools",
+      "run": [
+        "cmd",
+        "/c",
+        "build-tools.cmd"
+      ],
+      "done_if": "build/fw/psp_recomp.exe",
+      "prepare": true
+    },
+    {
+      "name": "Decrypt your EBOOT.BIN (downloads and compiles pspdecrypt on this PC)",
+      "run": [
+        "{python}",
+        "scripts/decrypt_eboot.py"
+      ],
+      "done_if": "build/EBOOT.dec",
+      "prepare": true
+    },
+    {
+      "name": "Translate the game code",
+      "run": [
+        "cmd",
+        "/c",
+        "translate.cmd"
+      ],
+      "done_if": "build/gen/generated_registry.cpp",
+      "prepare": true
+    },
+    {
+      "name": "FFmpeg 7.1 libraries (video and audio)",
+      "run": [
+        "{python}",
+        "scripts/fetch_ffmpeg.py"
+      ],
+      "done_if": "third_party/ffmpeg/lib/avcodec.lib",
+      "prepare": true
+    },
+    {
+      "name": "Compile",
+      "run": [
+        "cmd",
+        "/c",
+        "build-native.cmd",
+        "--jobs",
+        "{jobs}"
+      ],
+      "retry_if": "build/native/build.ninja"
+    }
+  ]
+}
