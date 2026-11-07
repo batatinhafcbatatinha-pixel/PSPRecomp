@@ -203,6 +203,18 @@ std::string emit_regular(const psprecomp::DecodedInstruction &d, std::uint32_t p
         out << "    { const std::uint64_t product = static_cast<std::uint64_t>(" << reg(d.rs) << ") * static_cast<std::uint64_t>(" << reg(d.rt) << "); "
             << "ctx.lo = static_cast<std::uint32_t>(product); ctx.hi = static_cast<std::uint32_t>(product >> 32u); }\n";
         break;
+    case psprecomp::OpcodeKind::Madd:
+        out << "    { std::uint64_t acc = (static_cast<std::uint64_t>(ctx.hi) << 32u) | ctx.lo; acc = acc + static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(" << reg(d.rs) << ")) * static_cast<std::int64_t>(static_cast<std::int32_t>(" << reg(d.rt) << "))); ctx.lo = static_cast<std::uint32_t>(acc); ctx.hi = static_cast<std::uint32_t>(acc >> 32u); }\n";
+        break;
+    case psprecomp::OpcodeKind::Maddu:
+        out << "    { std::uint64_t acc = (static_cast<std::uint64_t>(ctx.hi) << 32u) | ctx.lo; acc = acc + static_cast<std::uint64_t>(" << reg(d.rs) << ") * static_cast<std::uint64_t>(" << reg(d.rt) << "); ctx.lo = static_cast<std::uint32_t>(acc); ctx.hi = static_cast<std::uint32_t>(acc >> 32u); }\n";
+        break;
+    case psprecomp::OpcodeKind::Msub:
+        out << "    { std::uint64_t acc = (static_cast<std::uint64_t>(ctx.hi) << 32u) | ctx.lo; acc = acc - static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(" << reg(d.rs) << ")) * static_cast<std::int64_t>(static_cast<std::int32_t>(" << reg(d.rt) << "))); ctx.lo = static_cast<std::uint32_t>(acc); ctx.hi = static_cast<std::uint32_t>(acc >> 32u); }\n";
+        break;
+    case psprecomp::OpcodeKind::Msubu:
+        out << "    { std::uint64_t acc = (static_cast<std::uint64_t>(ctx.hi) << 32u) | ctx.lo; acc = acc - static_cast<std::uint64_t>(" << reg(d.rs) << ") * static_cast<std::uint64_t>(" << reg(d.rt) << "); ctx.lo = static_cast<std::uint32_t>(acc); ctx.hi = static_cast<std::uint32_t>(acc >> 32u); }\n";
+        break;
     case psprecomp::OpcodeKind::Div:
         // $zero is emitted as a literal 0u.  If it is also the divisor, do not
         // emit a syntactically present / or % expression at all: MSVC diagnoses
@@ -430,6 +442,16 @@ std::string emit_regular(const psprecomp::DecodedInstruction &d, std::uint32_t p
         const std::uint32_t source = (d.word >> 8u) & 0x7Fu;
         const std::uint32_t operation = (d.word >> 16u) & 3u;
         out << "    ctx.execute_vfpu_vx2i(" << destination << "u, " << source << "u, "
+            << source_length << "u, " << operation << "u);\n";
+        break;
+    }
+    case psprecomp::OpcodeKind::Vi2x: {
+        const std::uint32_t size_code = ((d.word >> 7u) & 1u) | (((d.word >> 15u) & 1u) << 1u);
+        const std::uint32_t source_length = size_code + 1u;
+        const std::uint32_t destination = d.word & 0x7Fu;
+        const std::uint32_t source = (d.word >> 8u) & 0x7Fu;
+        const std::uint32_t operation = (d.word >> 16u) & 3u;
+        out << "    ctx.execute_vfpu_vi2x(" << destination << "u, " << source << "u, "
             << source_length << "u, " << operation << "u);\n";
         break;
     }
@@ -845,10 +867,16 @@ std::string direct_unit_chain_expression(
                 std::to_string(unit) + "u, " + std::to_string(found->second) + "u, " +
                 psprecomp::hex32(target) + "u>(ctx, &aot_mem)";
         }
+        // Not an entry of any generated unit (its bucket may not exist at all,
+        // e.g. a call into code outside the analyzed image): resolve at runtime.
+        return "(ctx.pc = " + psprecomp::hex32(target) + "u, rt.invoke_chained_call(ctx, &aot_mem))";
     }
     return "rt.invoke_chained_direct<&" + generated_unit_cpp_name(unit) + ", " +
         std::to_string(unit) + "u>(ctx, &aot_mem)";
 }
+
+// PC of the control-flow instruction being emitted (for back-edge detection).
+std::uint32_t g_emit_branch_pc = 0u;
 
 void emit_target(std::ostringstream &body, std::uint32_t target,
                  const std::set<std::uint32_t> &labels, const char *indent,
@@ -857,6 +885,9 @@ void emit_target(std::ostringstream &body, std::uint32_t target,
                  const std::map<std::uint32_t, std::uint16_t> *direct_entry_ids = nullptr,
                  const std::set<std::uint32_t> *import_stubs = nullptr) {
     if (labels.contains(target)) {
+        if (target <= g_emit_branch_pc) {
+            body << indent << "if (!rt.loop_backedge(ctx, " << psprecomp::hex32(target) << "u)) return;\n";
+        }
         body << indent << "goto L_" << psprecomp::hex32(target).substr(2) << ";\n";
         return;
     }
@@ -965,11 +996,15 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
              << "    }\n";
     } else {
         body << "void " << cpp_name << "_entry(Runtime &rt, AllegrexContext &ctx, std::uint16_t direct_entry_id, GuestMemory::AotFastView &aot_mem) {\n"
-             << "    (void)direct_entry_id;\n"
              << "    std::uint32_t jump_target = 0u;\n"
              << "    std::uint32_t local_transfers = 0u;\n"
+             // JR lowering writes local_pc/entry_id before jumping back here;
+             // the sparse switch dispatches on local_pc and ignores entry ids.
+             << "    std::uint32_t local_pc = ctx.pc;\n"
+             << "    std::uint32_t entry_id = direct_entry_id;\n"
              << "LOCAL_DISPATCH:\n"
-             << "    switch (ctx.pc) {\n";
+             << "    (void)entry_id;\n"
+             << "    switch (local_pc) {\n";
         for (const auto label : function.entry_labels) {
             body << "    case " << psprecomp::hex32(label) << "u: goto L_"
                  << psprecomp::hex32(label).substr(2) << ";\n";
@@ -998,6 +1033,7 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
             }
 
             const auto decoded = psprecomp::decode_allegrex(memory.load32(pc));
+            g_emit_branch_pc = pc;
             if (decoded.has_delay_slot()) {
                 const auto slot = psprecomp::decode_allegrex(memory.load32(pc + 4u));
                 if (slot.is_control_flow()) {
@@ -1056,7 +1092,9 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
                         if (target_is_import) {
                             body << "    ctx.pc = " << psprecomp::hex32(target) << "u;\n"
                                  << "    return;\n";
-                            continue;
+                            // Leave the block walk: `continue` re-emitted this
+                            // same JAL forever because pc never advances.
+                            break;
                         }
                         // Otherwise run the callee inline and resume locally only
                         // if it came back to our return address.
@@ -1292,7 +1330,7 @@ std::string lower_constant_fpr_accesses(std::string text) {
     // All Allegrex FPR operands emitted by the decoder are architectural
     // constants in [0,31]. Avoid helper calls/bounds branches in enormous AOT
     // functions so MSVC can keep float lanes in registers across basic blocks.
-    const std::regex read_pattern(R"(ctx\.fpr_bits\(([0-9]+)\))");
+    static const std::regex read_pattern(R"(ctx\.fpr_bits\(([0-9]+)\))");
     std::smatch match;
     std::string lowered;
     lowered.reserve(text.size());
@@ -1355,66 +1393,87 @@ std::string lower_constant_fpr_accesses(std::string text) {
 // scalar-vs-control selection and 1..4-lane loops disappear before MSVC sees the
 // giant translation units. Dynamic-size matrix helpers remain untouched.
 std::string lower_constant_vfpu_accesses(std::string text) {
-    const std::regex read_prefix(
+    static const std::regex read_prefix(
         R"(ctx\.read_vfpu_vector_with_source_prefix\(([A-Za-z0-9_]+), ([0-9]+)u, ([1-4])u, ([01])u\);)" );
     text = std::regex_replace(text, read_prefix,
         "ctx.read_vfpu_vector_with_source_prefix_ct<$2u, $3u, $4u>($1);");
 
-    const std::regex read_plain(
+    static const std::regex read_plain(
         R"(ctx\.read_vfpu_vector\(([A-Za-z0-9_]+), ([0-9]+)u, ([1-4])u\);)" );
     text = std::regex_replace(text, read_plain,
         "ctx.read_vfpu_vector_ct<$2u, $3u>($1);");
 
-    const std::regex write_prefix(
+    static const std::regex write_prefix(
         R"(ctx\.write_vfpu_vector_with_destination_prefix\(([A-Za-z0-9_]+), ([0-9]+)u, ([1-4])u\);)" );
     text = std::regex_replace(text, write_prefix,
         "ctx.write_vfpu_vector_with_destination_prefix_ct<$2u, $3u>($1);");
 
-    const std::regex write_plain(
+    static const std::regex write_plain(
         R"(ctx\.write_vfpu_vector\(([A-Za-z0-9_]+), ([0-9]+)u, ([1-4])u\);)" );
     text = std::regex_replace(text, write_plain,
         "ctx.write_vfpu_vector_ct<$2u, $3u>($1);");
 
-    const std::regex source_prefix_plain(
+    static const std::regex source_prefix_plain(
         R"(ctx\.apply_vfpu_source_prefix\(([A-Za-z0-9_]+), ([1-4])u, ([01])u\);)" );
     text = std::regex_replace(text, source_prefix_plain,
         "ctx.apply_vfpu_source_prefix_ct<$2u, $3u>($1);");
 
-    const std::regex fpu_to_word(
+    static const std::regex fpu_to_word(
         R"(ctx\.fpu_float_to_word\(([^,\n]+), ([0-3])u\))" );
     text = std::regex_replace(text, fpu_to_word,
         "ctx.fpu_float_to_word_ct<$2u>($1)");
 
-    const std::regex vcmp(
+    static const std::regex vcmp(
         R"(ctx\.execute_vfpu_vcmp\(([0-9]+)u, ([0-9]+)u, ([1-4])u, ([0-9]+)u\);)" );
     text = std::regex_replace(text, vcmp,
         "ctx.execute_vfpu_vcmp_ct<$1u, $2u, $3u, $4u>();");
 
-    const std::regex vcmov(
+    static const std::regex vcmov(
         R"(ctx\.execute_vfpu_vcmov\(([0-9]+)u, ([0-9]+)u, ([1-4])u, ([0-7])u, (true|false)\);)" );
     text = std::regex_replace(text, vcmov,
         "ctx.execute_vfpu_vcmov_ct<$1u, $2u, $3u, $4u, $5>();");
 
-    const std::regex vdot(
+    static const std::regex vdot(
         R"(ctx\.execute_vfpu_vdot\(([0-9]+)u, ([0-9]+)u, ([0-9]+)u, ([1-4])u\);)" );
     text = std::regex_replace(text, vdot,
         "ctx.execute_vfpu_vdot_ct<$1u, $2u, $3u, $4u>();");
 
-    const std::regex vscl(
+    static const std::regex vscl(
         R"(ctx\.execute_vfpu_vscl\(([0-9]+)u, ([0-9]+)u, ([0-9]+)u, ([1-4])u\);)" );
     text = std::regex_replace(text, vscl,
         "ctx.execute_vfpu_vscl_ct<$1u, $2u, $3u, $4u>();");
 
-    const std::regex scalar_read(R"(ctx\.vfpu_scalar_bits\(([0-9]+)u\))");
+    // Only architectural scalars 0..143 have compile-time accessors; others
+    // (e.g. the `mfvc $zero, $255` sync idiom) keep the bounds-checked call.
+    static const std::regex scalar_read(R"(ctx\.vfpu_scalar_bits\((1[0-3][0-9]|14[0-3]|[1-9]?[0-9])u\))");
     text = std::regex_replace(text, scalar_read,
         "ctx.vfpu_scalar_bits_ct<$1u>()");
 
     // set_vfpu_scalar_bits second arguments in generated code stay on one line.
-    const std::regex scalar_write(
-        R"(ctx\.set_vfpu_scalar_bits\(([0-9]+)u, ([^;\n]+)\);)" );
+    static const std::regex scalar_write(
+        R"(ctx\.set_vfpu_scalar_bits\((1[0-3][0-9]|14[0-3]|[1-9]?[0-9])u, ([^;\n]+)\);)" );
     text = std::regex_replace(text, scalar_write,
         "ctx.set_vfpu_scalar_bits_ct<$1u>($2);");
     return text;
+}
+
+// The passes above rewrite text in place, which is quadratic over a multi-MB
+// unit. Every pattern they lower is confined to one emitted line, so applying
+// them line by line gives the same output in linear time.
+std::string lower_generated_source(const std::string &text) {
+    std::string lowered;
+    lowered.reserve(text.size() + text.size() / 4u);
+    std::size_t begin = 0u;
+    while (begin < text.size()) {
+        std::size_t end = text.find('\n', begin);
+        end = end == std::string::npos ? text.size() : end + 1u;
+        lowered += lower_constant_vfpu_accesses(
+            lower_aot_memory_accesses(
+                lower_constant_fpr_accesses(
+                    lower_constant_gpr_writes(text.substr(begin, end - begin)))));
+        begin = end;
+    }
+    return lowered;
 }
 
 bool write_text_if_changed(const std::filesystem::path &path, const std::string &text) {
@@ -1542,10 +1601,7 @@ int generate_auto(const std::filesystem::path &elf_path,
         // each grew past 2 GB, exhausting system memory during a normal build.
         // This pipeline matches the last configuration observed booting on
         // hardware.
-        out << lower_constant_vfpu_accesses(
-                lower_aot_memory_accesses(
-                    lower_constant_fpr_accesses(
-                        lower_constant_gpr_writes(emit_function_source(generated_unit, memory, generated_unit.name)))));
+        out << lower_generated_source(emit_function_source(generated_unit, memory, generated_unit.name));
         out << "void register_generated_unit_" << unit.bucket << "(Runtime &runtime) {\n";
         out << "    runtime.register_generated_unit(" << unit.bucket << "u, "
             << psprecomp::hex32(generated_unit.address) << "u, " << unit_span_bytes

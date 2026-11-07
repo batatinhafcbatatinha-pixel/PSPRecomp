@@ -286,6 +286,183 @@ void collect_relocated_data_code_pointers(const Elf32Image &elf,
     }
 }
 
+// Plain EXEC images without relocations (e.g. a decrypted retail EBOOT with
+// stripped sections) keep vtables, callback tables and init arrays inside the
+// single RWX load segment, so neither the non-executable-segment scan nor the
+// R_MIPS_32 pass sees them. Scan every word of the executable ranges for values
+// that point into code, and accept only targets that look like a function
+// start: a stack-frame prologue (addiu sp,sp,-N) or the slot right after a
+// `jr ra` + delay slot (optionally after nop padding). Instruction words that
+// happen to fall in the code range are filtered out by the same test.
+bool looks_like_function_start(const GuestMemory &memory,
+                               const std::vector<ExecutableRange> &ranges,
+                               std::uint32_t address) {
+    if (!is_executable_address(ranges, address)) return false;
+    const auto first = decode_allegrex(memory.load32(address));
+    if (first.kind == OpcodeKind::Addiu && first.rs == 29u && first.rt == 29u && first.immediate < 0) return true;
+    std::uint32_t probe = address;
+    for (int pad = 0; pad < 4; ++pad) {
+        if (probe < 8u || !is_executable_address(ranges, probe - 8u)) return false;
+        const std::uint32_t before = memory.load32(probe - 8u);
+        if (before == 0x03E00008u) return true;  // jr ra
+        if (memory.load32(probe - 4u) != 0u) return false;
+        probe -= 4u;  // previous word is a nop: allow alignment padding
+    }
+    return false;
+}
+
+void collect_unrelocated_exec_word_pointers(const Elf32Image &elf,
+                                            const GuestMemory &memory,
+                                            std::uint32_t load_base,
+                                            const std::vector<ExecutableRange> &ranges,
+                                            std::map<std::uint32_t, std::string> &seeds) {
+    if (!elf.relocation_sites(load_base).empty()) return;
+    for (const auto &range : ranges) {
+        for (std::uint32_t at = range.start; at + 4u <= range.end; at += 4u) {
+            const std::uint32_t value = memory.load32(at);
+            if (seeds.contains(value)) continue;
+            if (looks_like_function_start(memory, ranges, value)) {
+                seeds.try_emplace(value, "exec_word_code_pointer");
+            }
+        }
+    }
+}
+
+// Stripped EXEC images (GTA CTW) build vtables at run time, so default
+// methods such as a bare `jr ra; nop` at 0x08BB8110 are reached only through
+// heap pointers.  A small leaf that starts right after alignment padding
+// (`nop`, preceded by `nop` or `jr ra`) and returns within a few instructions
+// is seeded as an entry.
+void collect_padded_leaf_functions(const Elf32Image &elf,
+                                   const GuestMemory &memory,
+                                   std::uint32_t load_base,
+                                   const std::vector<ExecutableRange> &ranges,
+                                   std::map<std::uint32_t, std::string> &seeds) {
+    if (!elf.relocation_sites(load_base).empty()) return;
+    constexpr std::uint32_t kJrRa = 0x03E00008u;
+    for (const auto &range : ranges) {
+        for (std::uint32_t at = range.start + 8u; at + 4u <= range.end; at += 4u) {
+            const std::uint32_t word = memory.load32(at);
+            if (word == 0u || seeds.contains(at)) continue;
+            const std::uint32_t prev = memory.load32(at - 4u);
+            const std::uint32_t prev2 = memory.load32(at - 8u);
+            if (prev != 0u || (prev2 != 0u && prev2 != kJrRa)) continue;
+            bool returns = false;
+            for (std::uint32_t k = 0u; k < 8u && at + 4u * k + 4u <= range.end; ++k) {
+                const std::uint32_t w = memory.load32(at + 4u * k);
+                if (decode_allegrex(w).kind == OpcodeKind::Unsupported) break;
+                if (w == kJrRa) { returns = true; break; }
+            }
+            if (returns) seeds.try_emplace(at, "padded_leaf_function");
+        }
+    }
+}
+
+// Switch statements compile to `[sltiu at,idx,N; beqz at,default;] sll t,idx,2;
+// lui b,%hi(table); addu b,b,t; lw r,%lo(table)(b); jr r`. With relocations the
+// table words arrive as R_MIPS_32 seeds; without them every case label would be
+// an unknown indirect target. Recover the table base from the lui/lw pair and
+// seed its entries (N of them when the bound check is present, otherwise while
+// the words keep pointing at nearby code).
+void collect_unrelocated_jump_tables(const Elf32Image &elf,
+                                     const GuestMemory &memory,
+                                     std::uint32_t load_base,
+                                     const std::vector<ExecutableRange> &ranges,
+                                     std::map<std::uint32_t, std::string> &seeds) {
+    if (!elf.relocation_sites(load_base).empty()) return;
+    auto op = [](std::uint32_t w) { return w >> 26; };
+    auto rs = [](std::uint32_t w) { return (w >> 21) & 31u; };
+    auto rt = [](std::uint32_t w) { return (w >> 16) & 31u; };
+    auto rd = [](std::uint32_t w) { return (w >> 11) & 31u; };
+    auto simm = [](std::uint32_t w) { return static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int16_t>(w & 0xFFFFu))); };
+    auto word_at = [&](std::uint32_t a, std::uint32_t &out) {
+        if (!is_executable_address(ranges, a)) return false;
+        out = memory.load32(a);
+        return true;
+    };
+    for (const auto &range : ranges) {
+        for (std::uint32_t pc = range.start + 4u; pc + 4u <= range.end; pc += 4u) {
+            const std::uint32_t jr = memory.load32(pc);
+            if (op(jr) != 0u || (jr & 0x3Fu) != 8u || rs(jr) == 31u || rs(jr) == 0u) continue;
+            const std::uint32_t target_reg = rs(jr);
+            std::optional<std::uint32_t> base;
+            std::optional<std::uint32_t> bound;
+            for (std::uint32_t k = 1u; k < 10u && !base; ++k) {
+                std::uint32_t lw{};
+                if (pc < 4u * k || !word_at(pc - 4u * k, lw)) break;
+                if (op(lw) != 0x23u || rt(lw) != target_reg) continue;
+                std::uint32_t regs = 1u << rs(lw);
+                // %lo may sit in the lw offset or in an `addiu b,b,%lo(table)` before the addu (GTA CTW 0x08AF5B44).
+                std::uint32_t low = simm(lw);
+                for (std::uint32_t j = k + 1u; j < k + 12u; ++j) {
+                    std::uint32_t w{};
+                    if (!word_at(pc - 4u * j, w)) break;
+                    if (op(w) == 0u && (w & 0x3Fu) == 0x21u && (regs & (1u << rd(w))) != 0u) {
+                        regs |= (1u << rs(w)) | (1u << rt(w));
+                    } else if (op(w) == 0x09u && rs(w) == rt(w) && (regs & (1u << rt(w))) != 0u) {
+                        low += simm(w);
+                    } else if (op(w) == 0x0Fu && (regs & (1u << rt(w))) != 0u) {
+                        base = ((w & 0xFFFFu) << 16) + low;
+                        break;
+                    }
+                }
+                for (std::uint32_t j = k + 1u; j < k + 20u && base; ++j) {
+                    std::uint32_t w{};
+                    if (!word_at(pc - 4u * j, w)) break;
+                    if (op(w) == 0x0Bu) { bound = w & 0xFFFFu; break; }  // sltiu
+                }
+                break;
+            }
+            if (!base || !is_executable_address(ranges, *base)) continue;
+            const std::uint32_t limit = bound ? *bound : 1024u;
+            for (std::uint32_t n = 0u; n < limit; ++n) {
+                std::uint32_t value{};
+                if (!word_at(*base + 4u * n, value) || !is_executable_address(ranges, value)) break;
+                const std::uint32_t distance = value > pc ? value - pc : pc - value;
+                if (distance > 0x20000u) break;
+                seeds.try_emplace(value, "unrelocated_jump_table_target");
+            }
+        }
+    }
+}
+
+// Switch tables whose base is formed away from the jr (e.g. a shared `lui/addiu` base plus a constant offset,
+// GTA CTW 0x08B4E44C) escape collect_unrelocated_jump_tables. In a stripped EXEC image they still show up as a
+// run of consecutive words that all point at nearby code; seed runs of at least four such words.
+void collect_unrelocated_code_pointer_runs(const Elf32Image &elf,
+                                           const GuestMemory &memory,
+                                           std::uint32_t load_base,
+                                           const std::vector<ExecutableRange> &ranges,
+                                           std::map<std::uint32_t, std::string> &seeds) {
+    if (!elf.relocation_sites(load_base).empty()) return;
+    constexpr std::uint32_t kMinRun = 4u;
+    constexpr std::uint32_t kWindow = 0x20000u;
+    for (const auto &range : ranges) {
+        std::uint32_t run_start = range.start;
+        std::uint32_t run_length = 0u;
+        std::uint32_t low = 0u, high = 0u;
+        auto flush = [&](std::uint32_t end) {
+            if (run_length >= kMinRun)
+                for (std::uint32_t at = run_start; at < end; at += 4u)
+                    seeds.try_emplace(memory.load32(at), "code_pointer_run");
+            run_length = 0u;
+        };
+        for (std::uint32_t at = range.start; at + 4u <= range.end; at += 4u) {
+            const std::uint32_t value = memory.load32(at);
+            const bool code = (value & 3u) == 0u && is_executable_address(ranges, value);
+            if (code && run_length != 0u && std::max(high, value) - std::min(low, value) <= kWindow) {
+                ++run_length;
+                low = std::min(low, value);
+                high = std::max(high, value);
+                continue;
+            }
+            flush(at);
+            if (code) { run_start = at; run_length = 1u; low = high = value; }
+        }
+        flush(range.end & ~3u);
+    }
+}
+
 std::map<std::uint32_t, std::string> collect_initial_seeds(const Elf32Image &elf,
                                                            const GuestMemory &memory,
                                                            std::uint32_t load_base,
@@ -303,6 +480,10 @@ std::map<std::uint32_t, std::string> collect_initial_seeds(const Elf32Image &elf
     }
     collect_materialized_code_pointers(memory, ranges, seeds);
     collect_relocated_data_code_pointers(elf, memory, load_base, ranges, seeds);
+    collect_unrelocated_exec_word_pointers(elf, memory, load_base, ranges, seeds);
+    collect_unrelocated_jump_tables(elf, memory, load_base, ranges, seeds);
+    collect_unrelocated_code_pointer_runs(elf, memory, load_base, ranges, seeds);
+    collect_padded_leaf_functions(elf, memory, load_base, ranges, seeds);
     // R_MIPS_32 relocations are the authoritative source for function pointers
     // stored in read-only tables embedded in the executable segment (init arrays,
     // vtables, callbacks). Scanning raw RX words would confuse J opcodes with pointers.

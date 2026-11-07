@@ -24,6 +24,10 @@ class GuestMemory {
 public:
     static constexpr std::uint32_t kVramPhysicalBase = 0x04000000u;
     static constexpr std::uint32_t kVramSize = 2u * 1024u * 1024u;
+    // 16 KiB scratchpad at 0x00010000 (also through the 0x40000000/0x80000000 mirrors). It is stored
+    // after the 2 MiB of VRAM in vram_ so it shares the EDRAM slow path (GTA CTW clears 0x40010000).
+    static constexpr std::uint32_t kScratchpadBase = 0x00010000u;
+    static constexpr std::uint32_t kScratchpadSize = 0x4000u;
     static constexpr std::uint32_t kVramMirrorCount = 4u;
     static constexpr std::uint32_t kVramAddressSpan = kVramSize * kVramMirrorCount;
     static constexpr std::uint32_t kPhysicalBase = 0x08000000u;

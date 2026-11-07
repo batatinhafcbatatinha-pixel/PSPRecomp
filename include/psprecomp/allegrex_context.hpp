@@ -571,6 +571,52 @@ struct alignas(16) AllegrexContext {
         write_vfpu_vector_with_destination_prefix(result, destination_register, destination_length);
     }
 
+    // VI2UC/VI2C/VI2US/VI2S: pack integer lanes into bytes/halfwords (PPSSPP Int_Vi2x).
+    void execute_vfpu_vi2x(std::uint32_t destination_register,
+                            std::uint32_t source_register,
+                            std::uint32_t source_length,
+                            std::uint32_t operation) noexcept {
+        if (source_length == 0u || source_length > 4u || operation > 3u) return;
+
+        float source[4]{};
+        read_vfpu_vector(source, source_register, source_length);
+        apply_vfpu_source_prefix(source, source_length, 0u);
+        std::uint32_t s[4]{};
+        for (std::uint32_t lane = 0u; lane < 4u; ++lane) s[lane] = std::bit_cast<std::uint32_t>(source[lane]);
+
+        std::uint32_t result_bits[4]{};
+        std::uint32_t destination_length = 1u;
+        if (operation == 0u) { // VI2UC
+            for (std::uint32_t lane = 0u; lane < 4u; ++lane) {
+                const std::int32_t value = static_cast<std::int32_t>(s[lane]);
+                const std::uint32_t clamped = value < 0 ? 0u : static_cast<std::uint32_t>(value) >> 23u;
+                result_bits[0] |= (clamped & 0xFFu) << (lane * 8u);
+            }
+        } else if (operation == 1u) { // VI2C
+            for (std::uint32_t lane = 0u; lane < 4u; ++lane)
+                result_bits[0] |= (s[lane] >> 24u) << (lane * 8u);
+        } else { // VI2US / VI2S
+            destination_length = source_length >= 4u ? 2u : 1u;
+            for (std::uint32_t lane = 0u; lane < destination_length; ++lane) {
+                std::uint32_t low = s[lane * 2u];
+                std::uint32_t high = s[lane * 2u + 1u];
+                if (operation == 2u) {
+                    low = static_cast<std::int32_t>(low) < 0 ? 0u : low >> 15u;
+                    high = static_cast<std::int32_t>(high) < 0 ? 0u : high >> 15u;
+                } else {
+                    low >>= 16u;
+                    high >>= 16u;
+                }
+                result_bits[lane] = (low & 0xFFFFu) | (high << 16u);
+            }
+        }
+
+        float result[4]{};
+        for (std::uint32_t lane = 0u; lane < destination_length; ++lane)
+            result[lane] = std::bit_cast<float>(result_bits[lane]);
+        write_vfpu_vector_with_destination_prefix(result, destination_register, destination_length);
+    }
+
     void execute_vfpu_vx2i(std::uint32_t destination_register,
                             std::uint32_t source_register,
                             std::uint32_t source_length,

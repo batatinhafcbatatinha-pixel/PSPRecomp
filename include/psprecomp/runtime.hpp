@@ -132,6 +132,19 @@ public:
     // the native stack.  PSPRECOMP_NO_CHAIN=1 disables it for A/B checks.
     [[nodiscard]] bool invoke_chained_call(AllegrexContext &ctx,
                                            GuestMemory::AotFastView *shared_aot_mem = nullptr);
+    // Loop back-edge inside one generated function.  A guest busy-wait that
+    // never calls out would otherwise starve the timer-preemption boundary
+    // (chained calls only), so higher-priority PSP threads whose delays expire
+    // could never preempt it.  Returns false when the PSP context switched;
+    // the generated code then returns to the dispatcher (ctx holds the new
+    // thread, the old one resumes at `target`).
+    [[nodiscard]] bool loop_backedge(AllegrexContext &ctx, std::uint32_t target) {
+        const std::uint64_t interval = g_runtime_starvation_interval_fast;
+        if (interval == 0u) return true;
+        if (++dispatches_since_import_ < interval) return true;
+        ctx.pc = target;
+        return run_starvation_boundary(ctx);
+    }
     // Fast path for compile-time-known cross-unit targets.  Automatic AOT knows
     // the 16 KiB unit index and can avoid the large guest-PC dispatch table.
     // Units containing an import/HLE/host override fall back to the exact

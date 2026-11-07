@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -580,7 +581,7 @@ void Runtime::run(std::uint32_t entry, std::uint64_t max_dispatches) {
             const std::int32_t dispatch_thread_uid = g_runtime_thread_uid;
             RecompiledFunction function = lookup_function(before);
             if (function == nullptr) {
-                stop("No recompiled function registered at " + hex32(before));
+                stop("No recompiled function registered at " + hex32(before) + " ra=" + hex32(cpu_.gpr[31]) + " sp=" + hex32(cpu_.gpr[29]) + " prev=" + hex32(g_runtime_dispatch_pc));
                 return;
             }
             g_runtime_dispatch_pc = before;
@@ -657,7 +658,7 @@ void Runtime::run(std::uint32_t entry, std::uint64_t max_dispatches) {
             RecompiledFunction function = lookup_generated_unit(before);
             if (function == nullptr) function = lookup_function(before);
             if (function == nullptr) {
-                stop("No recompiled function registered at " + hex32(before));
+                stop("No recompiled function registered at " + hex32(before) + " ra=" + hex32(cpu_.gpr[31]) + " sp=" + hex32(cpu_.gpr[29]) + " prev=" + hex32(g_runtime_dispatch_pc));
                 break;
             }
             g_runtime_dispatch_pc = before;
@@ -716,7 +717,7 @@ void Runtime::run(std::uint32_t entry, std::uint64_t max_dispatches) {
         RecompiledFunction function = lookup_function(before);
         const FunctionEntry *function_entry = lookup_entry(before);
         if (function == nullptr) {
-            stop("No recompiled function registered at " + hex32(before));
+            stop("No recompiled function registered at " + hex32(before) + " ra=" + hex32(cpu_.gpr[31]) + " sp=" + hex32(cpu_.gpr[29]) + " prev=" + hex32(g_runtime_dispatch_pc));
             break;
         }
         g_runtime_dispatch_pc = before;
@@ -1090,7 +1091,31 @@ void Runtime::run(std::uint32_t entry, std::uint64_t max_dispatches) {
     }
 }
 
-void Runtime::stop(std::string reason) { stopped_ = true; stop_reason_ = std::move(reason); }
+void Runtime::stop(std::string reason) {
+    stopped_ = true;
+    stop_reason_ = std::move(reason);
+    // PSPRECOMP_DUMP_ON_STOP=<file>[,start,end]: save guest memory (default 0x08800000-0x0A000000) for offline analysis
+    // of code the game loads at run time (overlays), so it can be recompiled statically too.
+    if (const char *spec = std::getenv("PSPRECOMP_DUMP_ON_STOP"); spec && *spec) {
+        std::string s(spec), path = s;
+        std::uint32_t start = 0x08800000u, end = 0x0A000000u;
+        if (const auto comma = s.find(','); comma != std::string::npos) {
+            path = s.substr(0, comma);
+            start = static_cast<std::uint32_t>(std::strtoul(s.c_str() + comma + 1, nullptr, 0));
+            if (const auto comma2 = s.find(',', comma + 1); comma2 != std::string::npos)
+                end = static_cast<std::uint32_t>(std::strtoul(s.c_str() + comma2 + 1, nullptr, 0));
+        }
+        std::vector<std::uint8_t> data(end > start ? end - start : 0u);
+        try {
+            memory_.copy_out(start, data);
+            if (FILE *f = std::fopen(path.c_str(), "wb")) {
+                std::fwrite(data.data(), 1, data.size(), f);
+                std::fclose(f);
+            }
+        } catch (...) {
+        }
+    }
+}
 bool Runtime::stopped() const noexcept { return stopped_; }
 const std::string &Runtime::stop_reason() const noexcept { return stop_reason_; }
 

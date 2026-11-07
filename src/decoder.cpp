@@ -78,6 +78,8 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
         case 0x19: d.kind = OpcodeKind::Multu; d.mnemonic = "multu"; break;
         case 0x1A: d.kind = OpcodeKind::Div; d.mnemonic = "div"; break;
         case 0x1B: d.kind = OpcodeKind::Divu; d.mnemonic = "divu"; break;
+        case 0x1C: d.kind = OpcodeKind::Madd; d.mnemonic = "madd"; break;
+        case 0x1D: d.kind = OpcodeKind::Maddu; d.mnemonic = "maddu"; break;
         case 0x20: d.kind = OpcodeKind::Add; d.mnemonic = "add"; break;
         case 0x21: d.kind = OpcodeKind::Addu; d.mnemonic = "addu"; break;
         case 0x22: d.kind = OpcodeKind::Sub; d.mnemonic = "sub"; break;
@@ -90,6 +92,8 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
         case 0x2B: d.kind = OpcodeKind::Sltu; d.mnemonic = "sltu"; break;
         case 0x2C: d.kind = OpcodeKind::Max; d.mnemonic = "max"; break;
         case 0x2D: d.kind = OpcodeKind::Min; d.mnemonic = "min"; break;
+        case 0x2E: d.kind = OpcodeKind::Msub; d.mnemonic = "msub"; break;
+        case 0x2F: d.kind = OpcodeKind::Msubu; d.mnemonic = "msubu"; break;
         default: d.kind = OpcodeKind::Unsupported; d.mnemonic = "special?"; break;
         }
         break;
@@ -117,6 +121,7 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
     case 0x15: d.kind = OpcodeKind::Bnel; d.mnemonic = "bnel"; break;
     case 0x16: d.kind = OpcodeKind::Blezl; d.mnemonic = "blezl"; break;
     case 0x17: d.kind = OpcodeKind::Bgtzl; d.mnemonic = "bgtzl"; break;
+    case 0x08: d.kind = OpcodeKind::Addiu; d.mnemonic = "addi"; break;  // overflow trap not modelled
     case 0x09: d.kind = OpcodeKind::Addiu; d.mnemonic = "addiu"; break;
     case 0x0A: d.kind = OpcodeKind::Slti; d.mnemonic = "slti"; break;
     case 0x0B: d.kind = OpcodeKind::Sltiu; d.mnemonic = "sltiu"; break;
@@ -309,6 +314,10 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
             d.kind = OpcodeKind::Vx2i;
             static constexpr const char *names[4]{"vuc2i", "vc2i", "vus2i", "vs2i"};
             d.mnemonic = names[operation - 24u];
+        } else if (group == 1u && operation >= 28u) {
+            d.kind = OpcodeKind::Vi2x;
+            static constexpr const char *names[4]{"vi2uc", "vi2c", "vi2us", "vi2s"};
+            d.mnemonic = names[operation - 28u];
         } else if (group >= 16u && group <= 19u) {
             d.kind = OpcodeKind::Vf2i;
             static constexpr const char *names[4]{"vf2in", "vf2iz", "vf2iu", "vf2id"};

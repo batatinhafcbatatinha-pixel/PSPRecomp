@@ -70,7 +70,7 @@ void log_write_watch(std::uint32_t address, std::size_t length, const char *oper
 }
 
 GuestMemory::GuestMemory(std::uint32_t size_bytes)
-    : vram_(kVramSize, 0u), bytes_(size_bytes, 0u), write_watch_enabled_(std::getenv("PSPRECOMP_WATCH_WRITE") != nullptr) {
+    : vram_(kVramSize + kScratchpadSize, 0u), bytes_(size_bytes, 0u), write_watch_enabled_(std::getenv("PSPRECOMP_WATCH_WRITE") != nullptr) {
     if (size_bytes != 32u * 1024u * 1024u && size_bytes != 64u * 1024u * 1024u) {
         throw Error("PSP RAM size must be 32 MiB or 64 MiB");
     }
@@ -83,14 +83,17 @@ GuestMemory::GuestMemory(std::uint32_t size_bytes)
 }
 
 std::uint32_t GuestMemory::size() const noexcept { return static_cast<std::uint32_t>(bytes_.size()); }
-std::uint32_t GuestMemory::vram_size() const noexcept { return static_cast<std::uint32_t>(vram_.size()); }
+std::uint32_t GuestMemory::vram_size() const noexcept { return kVramSize; }
 
 bool GuestMemory::is_vram_window(std::uint32_t canonical_address) const noexcept {
-    return canonical_address >= kVramPhysicalBase &&
-           canonical_address < kVramPhysicalBase + kVramAddressSpan;
+    return (canonical_address >= kVramPhysicalBase &&
+            canonical_address < kVramPhysicalBase + kVramAddressSpan) ||
+           (canonical_address >= kScratchpadBase && canonical_address < kScratchpadBase + kScratchpadSize);
 }
 
 std::size_t GuestMemory::vram_offset(std::uint32_t canonical_address) const noexcept {
+    if (canonical_address < kVramPhysicalBase)
+        return static_cast<std::size_t>(kVramSize + (canonical_address - kScratchpadBase));
     return static_cast<std::size_t>((canonical_address - kVramPhysicalBase) & (kVramSize - 1u));
 }
 
@@ -98,7 +101,7 @@ bool GuestMemory::contains(std::uint32_t address, std::size_t length) const noex
     const std::uint32_t c = canonical(address);
     const std::uint64_t end = static_cast<std::uint64_t>(c) + static_cast<std::uint64_t>(length);
     if (is_vram_window(c) && end <= static_cast<std::uint64_t>(kVramPhysicalBase) + kVramAddressSpan)
-        return true;
+        return c >= kVramPhysicalBase || end <= static_cast<std::uint64_t>(kScratchpadBase) + kScratchpadSize;
     if (c >= kPhysicalBase && end <= static_cast<std::uint64_t>(kPhysicalBase) + bytes_.size())
         return true;
     return false;
