@@ -97,6 +97,9 @@ if(MSVC)
         DIRECTORY "${CTW_PROFILE_DIR}" PROPERTIES COMPILE_OPTIONS
         "$<$<CONFIG:Release>:/Ob3>;$<$<CONFIG:RelWithDebInfo>:/Ob3>")
     target_link_options(CTWNative PRIVATE /STACK:67108864)
+elseif(MINGW)
+    # Same 64 MB main-thread stack as the MSVC build; the C++ runtime linked in so the exe needs no extra DLLs.
+    target_link_options(CTWNative PRIVATE -Wl,--stack,67108864 -static)
 endif()
 
 add_custom_command(TARGET CTWNative POST_BUILD

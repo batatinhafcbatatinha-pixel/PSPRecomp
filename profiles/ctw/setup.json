@@ -4,9 +4,10 @@
   "play": "Play-CTW.cmd",
   "exe": "build/native/bin/CTWNative.exe",
   "disk_gb": 15,
-  "download_gb": 1,
+  "download_gb": 1.2,
   "minutes": "30-90",
   "tools": [
+    "llvm-mingw",
     "cmake",
     "ninja"
   ],
@@ -61,5 +62,6 @@
       ],
       "retry_if": "build/native/build.ninja"
     }
-  ]
+  ],
+  "buildtools": false
 }

@@ -61,15 +61,25 @@ def main():
         (WORK / top).rename(src)
     exe = WORK / 'prxdecrypt.exe'
     if not exe.is_file():
-        if not shutil.which('cl'):
-            raise SystemExit('cl.exe not found: run this from Setup / the launcher or an "x64 Native Tools" prompt')
         (src / 'prxdecrypt_main.cpp').write_text(MAIN, encoding='utf-8')
         kirk = [f'libkirk/{p.name}' for p in sorted((src / 'libkirk').glob('*.c'))]
-        objdir = '/Fo:' + str(WORK) + os.sep
-        subprocess.run(['cl', '/nologo', '/c', '/O2', '/TC', '/w', objdir] + kirk, cwd=src, check=True)
-        objs = [str(WORK / (Path(k).stem + '.obj')) for k in kirk]
-        subprocess.run(['cl', '/nologo', '/O2', '/EHsc', '/std:c++17', '/w', f'/Fe:{exe}', objdir, 'prxdecrypt_main.cpp'] + objs,
-                       cwd=src, check=True)
+        if shutil.which('clang') and shutil.which('clang++'):
+            # llvm-mingw (the launcher ZIP's compiler): C files as C, then the wrapper, linked statically.
+            objs = []
+            for k in kirk:
+                obj = WORK / (Path(k).stem + '.o')
+                subprocess.run(['clang', '-c', '-O2', '-w', '-o', str(obj), k], cwd=src, check=True)
+                objs.append(str(obj))
+            subprocess.run(['clang++', '-O2', '-std=c++17', '-w', '-static', '-o', str(exe), 'prxdecrypt_main.cpp'] + objs,
+                           cwd=src, check=True)
+        elif shutil.which('cl'):
+            objdir = '/Fo:' + str(WORK) + os.sep
+            subprocess.run(['cl', '/nologo', '/c', '/O2', '/TC', '/w', objdir] + kirk, cwd=src, check=True)
+            objs = [str(WORK / (Path(k).stem + '.obj')) for k in kirk]
+            subprocess.run(['cl', '/nologo', '/O2', '/EHsc', '/std:c++17', '/w', f'/Fe:{exe}', objdir, 'prxdecrypt_main.cpp'] + objs,
+                           cwd=src, check=True)
+        else:
+            raise SystemExit('No C++ compiler found: run this from Setup / the launcher')
     OUT.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run([str(exe), str(EBOOT), str(OUT)], check=True)
 

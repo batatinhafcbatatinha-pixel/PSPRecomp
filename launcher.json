@@ -10,9 +10,15 @@
   "section": "opcoes",
   "vulkan_dir": null,
   "deps": {
-    "buildtools_gb": 7,
+    "buildtools_gb": 0,
     "python_gb": 0.1,
     "tools": [
+      {
+        "id": "llvm-mingw",
+        "name": "llvm-mingw 20261020 (Clang 23)",
+        "check": ".local/tools/llvm-mingw-20261020/bin/clang++.exe",
+        "gb": 1.0
+      },
       {
         "id": "cmake",
         "name": "CMake 3.31.12",
