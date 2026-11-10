@@ -14,23 +14,23 @@ Windows 10/11 x64. About 15 GB free and 30-90 minutes for the first build.
 2. Run **`Launcher.cmd`** (it downloads `Launcher.exe` from the
    [port-installer releases](https://github.com/batatinhafcbatatinha-pixel/port-installer/releases) the first time).
 3. Click **CHOOSE ISO...** and pick your UMD image (`.iso`). The game is recognised from the disc.
-4. Confirm **Install**. The launcher installs what is missing (Python, Visual Studio C++ Build Tools, CMake, Ninja),
+4. Confirm **Install**. The launcher installs what is missing (Python, llvm-mingw, CMake, Ninja),
    copies and checks the game files, decrypts your `EBOOT.BIN` on your PC (it downloads and compiles
    [pspdecrypt](https://github.com/John-K/pspdecrypt) for that; nothing of it is in this repository), translates the game
-   code, fetches FFmpeg 7.1 and compiles. Finished steps are skipped next time. Log: **Install** tab and
+   code and its code overlays, fetches FFmpeg 7.1 and compiles. Finished steps are skipped next time. Log: **Install** tab and
    `profiles/<game>/setup-log.txt`.
 5. **PLAY**.
 
 | Game | Disc | State |
 | --- | --- | --- |
-| Grand Theft Auto: Chinatown Wars ([`profiles/ctw`](profiles/ctw/)) | PSP, USA (ULUS-10490) | reaches gameplay in the development build (intro, first mission, driving); the launcher build does not translate the code overlays yet, see below |
+| Grand Theft Auto: Chinatown Wars ([`profiles/ctw`](profiles/ctw/)) | PSP, USA (ULUS-10490) | reaches gameplay (intro, first mission, driving) in the development build; the launcher now runs the same steps, but a full launcher install has not been tested yet |
 
 Only this exact disc is supported (checked by SHA-256, see `profiles/ctw/installer.json`).
 
-Chinatown Wars keeps most of its game code in overlays (`OVERLAYS.PAK`) that it loads on demand. The development build
-translates them ahead of time with `psp_recomp --overlay` (`profiles/ctw/tools/make_ctw_overlays.py` and
-`regen_overlays.py`); `translate.cmd` and the launcher do not run that step yet, so a build made with them still stops
-after the logos. Known gaps in the development build: the PSP stencil buffer is not emulated (street-lamp light pools
+Chinatown Wars keeps most of its game code in overlays (`OVERLAYS.PAK`) that it loads on demand. The launcher
+translates them ahead of time with `psp_recomp --overlay` (`profiles/ctw/tools/make_ctw_overlays.py` writes them to
+`build/overlays`, `regen_overlays.py` translates them into `build/ovlgen`, `build-native.cmd` compiles them in). Known
+gaps: the PSP stencil buffer is not emulated (street-lamp light pools
 can look wrong), bloom is skipped on DirectX 12, a one-off pause of about two seconds after the logos, short hitches
 while a new part of the city streams in, and no in-game settings menu.
 
@@ -67,8 +67,10 @@ powershell -ExecutionPolicy Bypass -File tools\port-installer\setup\setup.ps1 -G
 ```
 
 Or step by step in `profiles/ctw/` (from an "x64 Native Tools" prompt, disc files in `game_files/`): `build-tools.cmd`,
-`python scripts/decrypt_eboot.py`, `translate.cmd`, `python scripts/fetch_ffmpeg.py`, `build-native.cmd`, then
-`Play-CTW.cmd`.
+`python scripts/decrypt_eboot.py`,
+`python tools/make_ctw_overlays.py game_files/PSP_GAME/USRDIR/WAD/OVERLAY/CTW_PSP_UMD_MASTER_SCEA/OVERLAYS.PAK build/EBOOT.dec build/overlays`,
+`translate.cmd`, `python tools/regen_overlays.py build/fw/psp_recomp.exe build/overlays build/ovlgen`,
+`python scripts/fetch_ffmpeg.py`, `build-native.cmd`, then `Play-CTW.cmd`.
 
 ## Screenshots
 
