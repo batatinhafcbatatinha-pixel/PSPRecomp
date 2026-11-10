@@ -23,9 +23,16 @@ Windows 10/11 x64. About 15 GB free and 30-90 minutes for the first build.
 
 | Game | Disc | State |
 | --- | --- | --- |
-| Grand Theft Auto: Chinatown Wars ([`profiles/ctw`](profiles/ctw/)) | PSP, USA (ULUS-10490) | not playable yet: boots its threads, black screen |
+| Grand Theft Auto: Chinatown Wars ([`profiles/ctw`](profiles/ctw/)) | PSP, USA (ULUS-10490) | reaches gameplay in the development build (intro, first mission, driving); the launcher build does not translate the code overlays yet, see below |
 
 Only this exact disc is supported (checked by SHA-256, see `profiles/ctw/installer.json`).
+
+Chinatown Wars keeps most of its game code in overlays (`OVERLAYS.PAK`) that it loads on demand. The development build
+translates them ahead of time with `psp_recomp --overlay` (`profiles/ctw/tools/make_ctw_overlays.py` and
+`regen_overlays.py`); `translate.cmd` and the launcher do not run that step yet, so a build made with them still stops
+after the logos. Known gaps in the development build: the PSP stencil buffer is not emulated (street-lamp light pools
+can look wrong), bloom is skipped on DirectX 12, a one-off pause of about two seconds after the logos, short hitches
+while a new part of the city streams in, and no in-game settings menu.
 
 ## Differences from upstream
 
@@ -35,6 +42,10 @@ Only this exact disc is supported (checked by SHA-256, see `profiles/ctw/install
 - codegen fixes: JAL to import stubs, sparse dispatch locals
 - `addi` decode, semaphore and event-flag timeouts
 - guest memory dump on runtime exceptions; overlay ELF helper (`profiles/ctw/tools/make_overlay_elf.py`)
+- static recompilation of code overlays: `psp_recomp <ELF> --overlay <dir> <tag>`, `Runtime::register_overlay` with
+  fingerprint routing of the overlay windows, extra analysis seeds (`PSPRECOMP_EXTRA_SEEDS`)
+- CTW on DirectX 12: general PSP blend modes, hardware back-face culling, timing at the stock 30 fps, kernel callback
+  and VBLANK interrupt delivery, native `inflate_fast`, headless input and frame capture for unattended tests
 
 ## Building
 
@@ -61,8 +72,11 @@ Or step by step in `profiles/ctw/` (from an "x64 Native Tools" prompt, disc file
 
 ## Screenshots
 
-Screenshots of each port at the furthest point it reaches are being captured and will appear here, one framed
-picture per game with its name.
+One framed picture per game, at the furthest point captured so far.
+
+![Grand Theft Auto: Chinatown Wars](docs/screenshots/gta-chinatown-wars.jpg)
+
+*Grand Theft Auto: Chinatown Wars* (DirectX 12 backend, start of the first mission)
 
 ## Upstream
 
