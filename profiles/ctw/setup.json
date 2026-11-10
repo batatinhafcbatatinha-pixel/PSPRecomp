@@ -33,6 +33,19 @@
       "prepare": true
     },
     {
+      "name": "Extract the code overlays (OVERLAYS.PAK)",
+      "run": [
+        "{python}",
+        "-I",
+        "tools/make_ctw_overlays.py",
+        "{game_files}/PSP_GAME/USRDIR/WAD/OVERLAY/CTW_PSP_UMD_MASTER_SCEA/OVERLAYS.PAK",
+        "build/EBOOT.dec",
+        "build/overlays"
+      ],
+      "done_if": "build/overlays/eboot_seeds.txt",
+      "prepare": true
+    },
+    {
       "name": "Translate the game code",
       "run": [
         "cmd",
@@ -40,6 +53,19 @@
         "translate.cmd"
       ],
       "done_if": "build/gen/generated_registry.cpp",
+      "prepare": true
+    },
+    {
+      "name": "Translate the code overlays",
+      "run": [
+        "{python}",
+        "-I",
+        "tools/regen_overlays.py",
+        "build/fw/psp_recomp.exe",
+        "build/overlays",
+        "build/ovlgen"
+      ],
+      "done_if": "build/ovlgen/ovl_registry.cpp",
       "prepare": true
     },
     {
