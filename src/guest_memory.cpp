@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -44,6 +46,9 @@ const WriteWatch &write_watch() {
     return watch;
 }
 
+const std::uint8_t *g_watch_ram = nullptr;
+std::size_t g_watch_ram_size = 0u;
+
 bool overlaps_watch(std::uint32_t address, std::size_t length) {
     const WriteWatch &watch = write_watch();
     if (!watch.enabled || length == 0u) return false;
@@ -66,6 +71,18 @@ void log_write_watch(std::uint32_t address, std::size_t length, const char *oper
               << " size=" << length
               << " old=0x" << std::hex << old_value
               << " new=0x" << new_value << std::dec << "\n";
+    // PSPRECOMP_WATCH_DUMP=<prefix>: also save main RAM (0x08000000 up) to <prefix>.<n>.bin on each
+    // watched write (first 16), so the guest stack at the moment of the write can be walked offline.
+    static const char *dump_prefix = std::getenv("PSPRECOMP_WATCH_DUMP");
+    static int dumps = 0;
+    if (dump_prefix != nullptr && *dump_prefix != '\0' && g_watch_ram != nullptr && dumps < 16) {
+        const std::string path = std::string(dump_prefix) + "." + std::to_string(dumps++) + ".bin";
+        if (FILE *f = std::fopen(path.c_str(), "wb")) {
+            std::fwrite(g_watch_ram, 1, g_watch_ram_size, f);
+            std::fclose(f);
+            std::cerr << "[watch-write] dumped " << path << "\n";
+        }
+    }
 }
 }
 
@@ -80,6 +97,10 @@ GuestMemory::GuestMemory(std::uint32_t size_bytes)
     ram_limit8_ = size_bytes - 1u;
     ram_limit16_ = size_bytes - 2u;
     ram_limit32_ = size_bytes - 4u;
+    if (write_watch_enabled_) {
+        g_watch_ram = bytes_.data();
+        g_watch_ram_size = bytes_.size();
+    }
 }
 
 std::uint32_t GuestMemory::size() const noexcept { return static_cast<std::uint32_t>(bytes_.size()); }

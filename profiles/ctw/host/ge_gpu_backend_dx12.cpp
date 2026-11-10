@@ -733,7 +733,65 @@ std::size_t blend_variant(const GeGpuDrawDescriptor &draw) noexcept {
     }
     if (eq == 0u && src == 2u && dst == 10u &&
         (draw.blend_fix_dest & 0x00FFFFFFu) == 0x00FFFFFFu) return 5u;
-    return 0u;
+    // Everything else (CTW: subtractive shadows, multiplicative water layers...) goes through the
+    // general mapping below instead of being drawn opaque.
+    return 6u;
+}
+
+// General PSP blend -> D3D12. PSP source factors 0/1 are DST_COLOR/ONE_MINUS_DST_COLOR, destination
+// factors 0/1 are SRC_COLOR/ONE_MINUS_SRC_COLOR; 2..9 are the (doubled) alpha factors, 10 is FIX.
+// D3D12 has a single blend-factor colour, so when both sides are non-trivial FIX colours the source
+// one wins (the destination becomes its complement when they complement each other).
+std::uint32_t general_fix_colour(const GeGpuDrawDescriptor &draw) noexcept {
+    const std::uint32_t fs = draw.blend_fix_source & 0x00FFFFFFu;
+    const std::uint32_t fd = draw.blend_fix_dest & 0x00FFFFFFu;
+    const bool src_fix = (draw.blend_source_factor & 0xFu) == 10u && fs != 0u && fs != 0x00FFFFFFu;
+    return src_fix ? fs : fd;
+}
+
+D3D12_BLEND general_factor(std::uint32_t factor, bool source, std::uint32_t fix,
+                           std::uint32_t chosen_fix) noexcept {
+    switch (factor) {
+    case 0u: return source ? D3D12_BLEND_DEST_COLOR : D3D12_BLEND_SRC_COLOR;
+    case 1u: return source ? D3D12_BLEND_INV_DEST_COLOR : D3D12_BLEND_INV_SRC_COLOR;
+    case 2u: case 6u: return D3D12_BLEND_SRC_ALPHA;
+    case 3u: case 7u: return D3D12_BLEND_INV_SRC_ALPHA;
+    case 4u: case 8u: return D3D12_BLEND_DEST_ALPHA;
+    case 5u: case 9u: return D3D12_BLEND_INV_DEST_ALPHA;
+    default: break;
+    }
+    if (fix == 0u) return D3D12_BLEND_ZERO;
+    if (fix == 0x00FFFFFFu) return D3D12_BLEND_ONE;
+    return fix == chosen_fix ? D3D12_BLEND_BLEND_FACTOR : D3D12_BLEND_INV_BLEND_FACTOR;
+}
+
+D3D12_BLEND_OP general_op(std::uint32_t equation) noexcept {
+    switch (equation & 7u) {
+    case 1u: return D3D12_BLEND_OP_SUBTRACT;
+    case 2u: return D3D12_BLEND_OP_REV_SUBTRACT;
+    case 3u: return D3D12_BLEND_OP_MIN;
+    case 4u: return D3D12_BLEND_OP_MAX;
+    default: return D3D12_BLEND_OP_ADD; // 0 add; 5 (absolute difference) approximated
+    }
+}
+
+bool general_blend_uses_factor(const GeGpuDrawDescriptor &draw) noexcept {
+    const auto nontrivial = [](std::uint32_t fix) { return fix != 0u && fix != 0x00FFFFFFu; };
+    return ((draw.blend_source_factor & 0xFu) == 10u && nontrivial(draw.blend_fix_source & 0x00FFFFFFu)) ||
+           ((draw.blend_dest_factor & 0xFu) == 10u && nontrivial(draw.blend_fix_dest & 0x00FFFFFFu));
+}
+
+std::uint64_t general_blend_key(const GeGpuDrawDescriptor &draw) noexcept {
+    // Equation, both factors, and per FIX whether it is zero/one/the factor colour/its complement.
+    const auto fix_class = [&](std::uint32_t fix) -> std::uint64_t {
+        if (fix == 0u) return 0u;
+        if (fix == 0x00FFFFFFu) return 1u;
+        return fix == general_fix_colour(draw) ? 2u : 3u;
+    };
+    return (std::uint64_t{draw.blend_equation & 7u}) | (std::uint64_t{draw.blend_source_factor & 0xFu} << 3u) |
+           (std::uint64_t{draw.blend_dest_factor & 0xFu} << 7u) |
+           (fix_class(draw.blend_fix_source & 0x00FFFFFFu) << 11u) |
+           (fix_class(draw.blend_fix_dest & 0x00FFFFFFu) << 13u);
 }
 
 std::uint8_t color_write_mask(const GeGpuDrawDescriptor &draw) noexcept {
@@ -750,6 +808,7 @@ std::uint64_t pipeline_key(const GeGpuDrawDescriptor &draw) noexcept {
     key |= static_cast<std::uint64_t>(draw.depth_write_enabled ? 1u : 0u) << 1u;
     key |= static_cast<std::uint64_t>(draw.depth_function & 7u) << 2u;
     key |= static_cast<std::uint64_t>(blend_variant(draw) & 7u) << 5u;
+    if (blend_variant(draw) == 6u) key |= general_blend_key(draw) << 12u;
     key |= static_cast<std::uint64_t>(color_write_mask(draw) & 0xFu) << 8u;
     return key;
 }
@@ -808,6 +867,8 @@ bool adjacent_batch_merge_compatible(const Dx12Batch &a, const Dx12Batch &b) noe
     if (blend_variant(a.draw) == 4u &&
         (a.draw.blend_fix_source & 0x00FFFFFFu) !=
         (b.draw.blend_fix_source & 0x00FFFFFFu)) return false;
+    if (blend_variant(a.draw) == 6u && general_blend_uses_factor(a.draw) &&
+        general_fix_colour(a.draw) != general_fix_colour(b.draw)) return false;
     // Pixel state moved out of the vertex stream in 45.4, so merged draws must
     // share the exact root-constant state rather than merely a compatible PSO.
     const Dx12PixelConstants pa = make_pixel_constants(a.draw, a.draw.texture_enabled);
@@ -1631,6 +1692,28 @@ ComPtr<ID3D12PipelineState> create_pipeline(Dx12GeState &s,
         blend.SrcBlendAlpha = D3D12_BLEND_ONE;
         blend.DestBlendAlpha = D3D12_BLEND_ONE;
         break;
+    case 6u: {
+        const std::uint32_t chosen = general_fix_colour(draw);
+        blend.SrcBlend = general_factor(draw.blend_source_factor & 0xFu, true,
+                                        draw.blend_fix_source & 0x00FFFFFFu, chosen);
+        blend.DestBlend = general_factor(draw.blend_dest_factor & 0xFu, false,
+                                         draw.blend_fix_dest & 0x00FFFFFFu, chosen);
+        blend.BlendOp = general_op(draw.blend_equation);
+        blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+        blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+        blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        if (std::getenv("PSPRECOMP_BLEND_DIAG") != nullptr) {
+            char text[200];
+            std::snprintf(text, sizeof text,
+                          "[blend] general eq=%u src=%u dst=%u fixsrc=%06X fixdst=%06X tex=%d texfunc=%u texalpha=%d atest=%d",
+                          draw.blend_equation & 7u, draw.blend_source_factor & 0xFu, draw.blend_dest_factor & 0xFu,
+                          draw.blend_fix_source & 0x00FFFFFFu, draw.blend_fix_dest & 0x00FFFFFFu,
+                          draw.texture_enabled ? 1 : 0, draw.texture_function & 7u, draw.texture_use_alpha ? 1 : 0,
+                          draw.alpha_test_enabled ? 1 : 0);
+            std::fprintf(stderr, "%s\n", text);
+        }
+        break;
+    }
     default:
         break;
     }
@@ -3986,8 +4069,10 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
             active_scissor = scissor;
             active_scissor_valid = true;
         }
-        if (blend_variant(batch.draw) == 4u) {
-            const std::uint32_t fix = batch.draw.blend_fix_source & 0x00FFFFFFu;
+        const std::size_t batch_variant = blend_variant(batch.draw);
+        if (batch_variant == 4u || (batch_variant == 6u && general_blend_uses_factor(batch.draw))) {
+            const std::uint32_t fix = batch_variant == 4u ? batch.draw.blend_fix_source & 0x00FFFFFFu
+                                                          : general_fix_colour(batch.draw);
             if (fix != active_blend_fix) {
                 const float factors[4]{
                     static_cast<float>(fix & 0xFFu) / 255.0f,

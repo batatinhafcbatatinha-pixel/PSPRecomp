@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -223,7 +224,12 @@ bool Runtime::invoke_chained_call(AllegrexContext &ctx, GuestMemory::AotFastView
     // its unit index for both function and entry lookup.
     RecompiledFunction function = nullptr;
     RecompiledEntryFunction entry_function = nullptr;
-    if (generated_unit_layout_valid_ && generated_unit_span_ != 0u) {
+    bool overlay_window = false;
+    if (!overlay_images_.empty()) {
+        function = lookup_overlay(memory_.canonical(ctx.pc), overlay_window);
+        if (overlay_window && function == nullptr) return false;
+    }
+    if (!overlay_window && generated_unit_layout_valid_ && generated_unit_span_ != 0u) {
         const std::uint32_t canonical_pc = memory_.canonical(ctx.pc);
         if (canonical_pc >= generated_unit_base_) {
             const std::uint32_t unit_delta = canonical_pc - generated_unit_base_;
@@ -449,8 +455,59 @@ void Runtime::register_function(std::uint32_t address, RecompiledFunction functi
     }
 }
 
+void Runtime::register_overlay(std::uint32_t base, std::uint32_t end, std::vector<OverlayCheck> checks,
+                               RecompiledFunction function, std::string name) {
+    base = memory_.canonical(base);
+    end = memory_.canonical(end - 1u) + 1u;
+    for (auto &check : checks) check.address = memory_.canonical(check.address);
+    overlay_images_.push_back(OverlayImage{base, end, std::move(checks), function, std::move(name)});
+    overlay_low_ = std::min(overlay_low_, base);
+    overlay_high_ = std::max(overlay_high_, end);
+}
+
+bool Runtime::overlay_matches(const OverlayImage &image) const noexcept {
+    for (const auto &check : image.checks) {
+        if (memory_.load32(check.address) != check.word) return false;
+    }
+    return true;
+}
+
+Runtime::RecompiledFunction Runtime::lookup_overlay(std::uint32_t c, bool &in_window) const noexcept {
+    in_window = false;
+    if (c < overlay_low_ || c >= overlay_high_) return nullptr;
+    // Two most recently used images first (one per window in practice).
+    for (const std::size_t cached : {overlay_last_, overlay_last_other_}) {
+        if (cached >= overlay_images_.size()) continue;
+        const OverlayImage &image = overlay_images_[cached];
+        if (c >= image.base && c < image.end && overlay_matches(image)) {
+            in_window = true;
+            if (cached != overlay_last_) std::swap(overlay_last_, overlay_last_other_);
+            return image.function;
+        }
+    }
+    for (std::size_t index = 0; index < overlay_images_.size(); ++index) {
+        const OverlayImage &image = overlay_images_[index];
+        if (c < image.base || c >= image.end) continue;
+        in_window = true;
+        if (!overlay_matches(image)) continue;
+        if (std::getenv("PSPRECOMP_OVERLAY_DIAG") != nullptr)
+            std::cerr << "[overlay] active " << image.name << " for pc " << hex32(c) << "\n";
+        if (overlay_last_ < overlay_images_.size() &&
+            (overlay_images_[overlay_last_].base != image.base))
+            overlay_last_other_ = overlay_last_;
+        overlay_last_ = index;
+        return image.function;
+    }
+    return nullptr;
+}
+
 Runtime::RecompiledFunction Runtime::lookup_function(std::uint32_t address) const noexcept {
     const std::uint32_t c = memory_.canonical(address);
+    if (!overlay_images_.empty()) {
+        bool in_window = false;
+        const RecompiledFunction overlay = lookup_overlay(c, in_window);
+        if (in_window) return overlay;
+    }
     const std::uint32_t delta = c - direct_base_;
     if ((delta & 3u) == 0u) {
         const std::size_t index = static_cast<std::size_t>(delta) / 4u;
@@ -463,6 +520,9 @@ Runtime::RecompiledFunction Runtime::lookup_function(std::uint32_t address) cons
 Runtime::RecompiledFunction Runtime::lookup_generated_unit(std::uint32_t address) const noexcept {
     if (!generated_unit_layout_valid_ || generated_unit_span_ == 0u) return nullptr;
     const std::uint32_t c = memory_.canonical(address);
+    // Overlay windows share generated-unit buckets with the main image; the
+    // caller falls back to lookup_function(), which routes the overlay.
+    if (c >= overlay_low_ && c < overlay_high_) return nullptr;
     if (c < generated_unit_base_) return nullptr;
     const std::uint32_t delta = c - generated_unit_base_;
     const std::size_t unit_index = generated_unit_span_ == 16384u
@@ -1171,9 +1231,70 @@ void Runtime::invoke_native_fast_path(std::uint32_t address, AllegrexContext &ct
     ctx.gpr[0] = 0u;
 }
 
+namespace {
+// PSPRECOMP_HLE_TRACE_UID=<uid>: print every HLE import that guest thread makes (first 6000).
+void trace_hle_call(const NidRegistry &nids, std::string_view library, std::uint32_t nid,
+                    const AllegrexContext &ctx) {
+    static const long uid = [] {
+        const char *text = std::getenv("PSPRECOMP_HLE_TRACE_UID");
+        return text != nullptr && *text != '\0' ? std::strtol(text, nullptr, 0) : -1000L;
+    }();
+    if (uid == -1000L || g_runtime_thread_uid != uid) return;
+    // PSPRECOMP_HLE_TRACE_FROM_RA=<hex>: stay quiet until an import is called with this return address.
+    static const unsigned long from_ra = [] {
+        const char *text = std::getenv("PSPRECOMP_HLE_TRACE_FROM_RA");
+        return text != nullptr ? std::strtoul(text, nullptr, 16) : 0ul;
+    }();
+    static bool armed = from_ra == 0ul;
+    if (!armed) {
+        if (ctx.gpr[31] != from_ra) return;
+        armed = true;
+    }
+    static unsigned printed = 0u;
+    if (printed++ >= 6000u) return;
+    const std::string library_name(library);
+    const auto name = nids.resolve(library_name, nid).value_or(hex32(nid));
+    std::fprintf(stderr, "[hle] uid=%d %s::%s a0=%08X a1=%08X a2=%08X ra=%08X\n", g_runtime_thread_uid,
+                 library_name.c_str(), name.c_str(), ctx.gpr[4], ctx.gpr[5], ctx.gpr[6], ctx.gpr[31]);
+}
+} // namespace
+
+namespace {
+// PSPRECOMP_HLE_SLOW_MS=<n>: report every HLE import whose host execution takes n ms or more.
+struct SlowHleTimer {
+    static long threshold() {
+        static const long value = [] {
+            const char *text = std::getenv("PSPRECOMP_HLE_SLOW_MS");
+            return text != nullptr ? std::strtol(text, nullptr, 10) : 0L;
+        }();
+        return value;
+    }
+    SlowHleTimer(const NidRegistry &nids, std::string_view library, std::uint32_t nid, std::uint32_t ra)
+        : nids_(nids), library_(library), nid_(nid), ra_(ra), active_(threshold() > 0) {
+        if (active_) start_ = std::chrono::steady_clock::now();
+    }
+    ~SlowHleTimer() {
+        if (!active_) return;
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_).count();
+        if (ms < threshold()) return;
+        const std::string library_name(library_);
+        const auto name = nids_.resolve(library_name, nid_).value_or(hex32(nid_));
+        std::fprintf(stderr, "[hle-slow] %lld ms uid=%d %s::%s ra=%08X%c", static_cast<long long>(ms),
+                     g_runtime_thread_uid, library_name.c_str(), name.c_str(), ra_, 10);
+    }
+    const NidRegistry &nids_;
+    std::string_view library_;
+    std::uint32_t nid_, ra_;
+    bool active_;
+    std::chrono::steady_clock::time_point start_{};
+};
+} // namespace
+
 void Runtime::invoke_import_cached(std::uint32_t slot, std::string_view library,
                                    std::uint32_t nid, AllegrexContext &ctx) {
     if (hle_histogram_enabled_) ++hle_histogram_[hle_key(library, nid)];
+    trace_hle_call(nids_, library, nid, ctx);
 
     const HleFunction *bound = slot < import_bindings_.size() ? import_bindings_[slot] : nullptr;
     if (bound == nullptr) {
@@ -1191,7 +1312,8 @@ void Runtime::invoke_import_cached(std::uint32_t slot, std::string_view library,
         import_bindings_[slot] = bound;
     }
 
-    (*bound)(*this, ctx);
+    { const SlowHleTimer slow_timer(nids_, library, nid, ctx.gpr[31]);
+      (*bound)(*this, ctx); }
     if (!stopped_ && g_post_import_hook != nullptr) g_post_import_hook(*this, ctx);
 }
 
@@ -1201,6 +1323,7 @@ void Runtime::invoke_import(std::string_view library, std::uint32_t nid, Allegre
     // while a thread spinning on an operation the host never completes shows up
     // as a huge count on one or two wait imports.
     if (hle_histogram_enabled_) ++hle_histogram_[hle_key(library, nid)];
+    trace_hle_call(nids_, library, nid, ctx);
     const auto library_it = hle_.find(library);
     const auto function_it = library_it != hle_.end()
         ? library_it->second.find(nid) : HleLibrary::const_iterator{};
@@ -1210,7 +1333,8 @@ void Runtime::invoke_import(std::string_view library, std::uint32_t nid, Allegre
         stop("Missing HLE import " + library_name + "::" + name);
         return;
     }
-    function_it->second(*this, ctx);
+    { const SlowHleTimer slow_timer(nids_, library, nid, ctx.gpr[31]);
+      function_it->second(*this, ctx); }
     if (!stopped_ && g_post_import_hook != nullptr) g_post_import_hook(*this, ctx);
 }
 

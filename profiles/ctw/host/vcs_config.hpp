@@ -146,7 +146,7 @@ struct TimingConfiguration {
     // Native VCS renders every other 59.94 Hz vblank (30 FPS). 60 removes that
     // skip; 120/240 also raise the virtual display cadence so they are real
     // game-frame targets rather than duplicated presentation frames.
-    std::uint32_t frame_rate{240u};
+    std::uint32_t frame_rate{30u}; // CTW: stock PSP timing (60 Hz vblank); the game paces itself by vblanks
     bool realtime_speed_diagnostics{false};
     std::uint64_t realtime_speed_interval_vblanks{120u};
 };

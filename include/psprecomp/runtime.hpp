@@ -81,6 +81,19 @@ public:
     const NidRegistry &nids() const noexcept;
 
     void register_function(std::uint32_t address, RecompiledFunction function, std::string name);
+
+    // Fixed-address code overlays.  Several statically recompiled images can
+    // share one guest address window; the one whose fingerprint words match
+    // guest memory right now handles every dispatch into [base, end).  Calls
+    // into an overlay window always go through the outer dispatcher or
+    // invoke_chained_call(), never through compile-time unit chains.
+    struct OverlayCheck {
+        std::uint32_t address;
+        std::uint32_t word;
+    };
+    void register_overlay(std::uint32_t base, std::uint32_t end, std::vector<OverlayCheck> checks,
+                          RecompiledFunction function, std::string name);
+    [[nodiscard]] std::size_t overlay_count() const noexcept { return overlay_images_.size(); }
     void register_hle(std::string library, std::uint32_t nid, HleFunction function);
     [[nodiscard]] bool has_function(std::uint32_t address) const;
     [[nodiscard]] std::size_t function_count() const noexcept;
@@ -287,6 +300,22 @@ private:
     // unit. Host/import-overlapped units are poisoned and return nullptr.
     [[nodiscard]] RecompiledFunction lookup_generated_unit(std::uint32_t address) const noexcept;
     [[nodiscard]] const FunctionEntry *lookup_entry(std::uint32_t address) const noexcept;
+    struct OverlayImage {
+        std::uint32_t base{};
+        std::uint32_t end{};
+        std::vector<OverlayCheck> checks;
+        RecompiledFunction function{};
+        std::string name;
+    };
+    [[nodiscard]] bool overlay_matches(const OverlayImage &image) const noexcept;
+    // nullptr when the canonical PC lies outside every overlay window.
+    // Otherwise the image loaded there now (or nullptr if none matches).
+    [[nodiscard]] RecompiledFunction lookup_overlay(std::uint32_t canonical_pc, bool &in_window) const noexcept;
+    std::vector<OverlayImage> overlay_images_;
+    std::uint32_t overlay_low_{0xFFFFFFFFu};
+    std::uint32_t overlay_high_{0u};
+    mutable std::size_t overlay_last_{static_cast<std::size_t>(-1)};
+    mutable std::size_t overlay_last_other_{static_cast<std::size_t>(-1)};
     // Returns false only when the starvation/preemption hook changed the PSP
     // execution context at this safe boundary.
     [[nodiscard]] bool account_dispatch_work(AllegrexContext &ctx, bool allow_preemption);

@@ -12,6 +12,17 @@ set(PSPRECOMP_GENERATED_INLINE_LEVEL "0" CACHE STRING
     "MSVC /Ob level for generated CTW AOT units (0, 1, 2 or 3)")
 
 file(GLOB CTW_GENERATED CONFIGURE_DEPENDS "${CTW_GENERATED_DIR}/*.cpp")
+
+# Code overlays from OVERLAYS.PAK (psp_recomp --overlay, see gtactw scripts),
+# each one routed at run time by Runtime::register_overlay().  Optional.
+set(CTW_OVERLAY_GENERATED_DIR "" CACHE PATH
+    "Directory holding psp_recomp --overlay output and ovl_registry.cpp")
+set(CTW_HAS_OVERLAYS OFF)
+if(CTW_OVERLAY_GENERATED_DIR AND EXISTS "${CTW_OVERLAY_GENERATED_DIR}/ovl_registry.cpp")
+    file(GLOB CTW_OVERLAY_GENERATED CONFIGURE_DEPENDS "${CTW_OVERLAY_GENERATED_DIR}/*.cpp")
+    list(APPEND CTW_GENERATED ${CTW_OVERLAY_GENERATED})
+    set(CTW_HAS_OVERLAYS ON)
+endif()
 if(MSVC)
     if(PSPRECOMP_GENERATED_OPT_LEVEL STREQUAL "0")
         set(CTW_GENERATED_MSVC_OPT "/Od")
@@ -36,6 +47,7 @@ set(CTW_HOST_SOURCES
     host/vcs_profile.cpp
     host/ctw_hle.cpp
     host/vcs_native_fast_paths.cpp
+    host/ctw_native_inflate.cpp
     host/framebuffer_capture.cpp
     host/display_window.cpp
     host/audio_output.cpp
@@ -70,6 +82,9 @@ target_include_directories(CTWNative PRIVATE
     "${CTW_GENERATED_DIR}"
     "${CTW_PROFILE_DIR}/third_party/ffmpeg/include")
 target_link_libraries(CTWNative PRIVATE psprecomp_core ${CMAKE_DL_LIBS})
+if(CTW_HAS_OVERLAYS)
+    target_compile_definitions(CTWNative PRIVATE CTW_HAS_OVERLAYS=1)
+endif()
 set_target_properties(CTWNative PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 psprecomp_enable_host_avx(CTWNative)
 

@@ -31,6 +31,10 @@
 #include <windows.h>
 #endif
 
+#if defined(CTW_HAS_OVERLAYS)
+namespace psprecomp { void register_generated_overlays(Runtime &runtime); }
+#endif
+
 namespace {
 
 #ifdef _WIN32
@@ -157,6 +161,8 @@ void validate_vcs_game_root(const std::filesystem::path &root) {
 
 } // namespace
 
+namespace vcs { void install_ctw_native_inflate(); }
+
 int main(int argc, char **argv) {
 #ifdef _WIN32
     SetUnhandledExceptionFilter(&vcs_unhandled_exception_filter);
@@ -193,6 +199,12 @@ int main(int argc, char **argv) {
         const std::uint32_t user_arena_start =
             static_cast<std::uint32_t>((image_end + 0xFFu) & ~0xFFull);
         psprecomp::register_generated_functions(runtime);
+#if defined(CTW_HAS_OVERLAYS)
+        // Code overlays share fixed windows; Runtime routes each dispatch to the
+        // image currently present in guest memory.
+        psprecomp::register_generated_overlays(runtime);
+        std::cout << "Code overlays:        " << runtime.overlay_count() << '\n';
+#endif
         // Reads [SimulateHDR] out of the same ini. The effect itself is built
         // lazily on the first frame the Vulkan backend records.
         vcs::hdr_post_configure(configuration.source_path);
@@ -301,9 +313,10 @@ int main(int argc, char **argv) {
         vcs::display_window_start();
         vcs::install_display_heartbeat();
         vcs::install_starvation_preemption();
+        vcs::install_ctw_native_inflate();
         // PSPRECOMP_PC_SAMPLE=<ms>: host watchdog printing the guest dispatch PC, thread and ctx pc/ra (racy, diag only).
         if (const char *sample = std::getenv("PSPRECOMP_PC_SAMPLE"); sample != nullptr) {
-            const int ms = std::max(50, std::atoi(sample));
+            const int ms = std::max(1, std::atoi(sample));
             psprecomp::Runtime *rt = &runtime;
             std::thread([rt, ms] {
                 for (;;) {

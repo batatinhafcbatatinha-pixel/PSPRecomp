@@ -1668,8 +1668,62 @@ int generate_auto(const std::filesystem::path &elf_path,
 
 } // namespace
 
+// One fixed-address code overlay (a game-loaded image that shares its address
+// window with other overlays) as a single self-contained C++ function.  Every
+// edge that leaves the image goes through Runtime::invoke_chained_call(), which
+// routes overlay windows by fingerprint, so no main-image unit tables are used.
+int generate_overlay(const std::filesystem::path &elf_path,
+                     const std::filesystem::path &output_dir,
+                     const std::string &tag) {
+    const auto elf = psprecomp::Elf32Image::from_file(elf_path);
+    psprecomp::GuestMemory memory;
+    (void)elf.load_and_relocate(memory, 0u);
+    const auto program = psprecomp::analyze_program(elf, memory, 0u);
+    if (program.executable_ranges.empty() || program.covered_labels.empty())
+        throw psprecomp::Error("overlay has no code: " + elf_path.string());
+    const std::uint32_t base = program.executable_ranges.front().start;
+    const std::uint32_t end = program.executable_ranges.back().end;
+
+    std::set<std::uint32_t> entries = program.covered_entry_labels;
+    for (const auto &[seed, source] : program.seeds) {
+        (void)source;
+        if (program.covered_labels.contains(seed)) entries.insert(seed);
+    }
+    for (const auto pc : program.covered_labels)
+        if (!program.covered_labels.contains(pc - 4u)) entries.insert(pc);
+
+    const std::string name = "ovl_" + tag;
+    const GeneratedFunctionInput input{name, base, program.covered_labels, entries, 0u, 0u, nullptr, nullptr};
+
+    // Fingerprint: up to 24 instruction words spread over the image's code.
+    // Only analysed instruction PCs are sampled, so writable overlay data that
+    // the game changes after loading never breaks the match.
+    std::vector<std::uint32_t> code(program.covered_labels.begin(), program.covered_labels.end());
+    std::vector<std::uint32_t> samples;
+    const std::size_t count = std::min<std::size_t>(24u, code.size());
+    for (std::size_t i = 0; i < count; ++i) samples.push_back(code[(i * (code.size() - 1u)) / std::max<std::size_t>(1u, count - 1u)]);
+    samples.erase(std::unique(samples.begin(), samples.end()), samples.end());
+
+    std::ostringstream out;
+    out << "#include \"psprecomp/runtime.hpp\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
+    out << lower_generated_source(emit_function_source(input, memory, name));
+    out << "void register_overlay_" << tag << "(Runtime &runtime) {\n"
+        << "    runtime.register_overlay(" << psprecomp::hex32(base) << "u, " << psprecomp::hex32(end) << "u, {";
+    for (const auto pc : samples)
+        out << "{" << psprecomp::hex32(pc) << "u, " << psprecomp::hex32(memory.load32(pc)) << "u}, ";
+    out << "}, &" << name << ", \"" << name << "\");\n}\n} // namespace psprecomp\n";
+    std::filesystem::create_directories(output_dir);
+    (void)write_text_if_changed(output_dir / (name + ".cpp"), out.str());
+    std::cout << name << " base=" << psprecomp::hex32(base) << " end=" << psprecomp::hex32(end)
+              << " pcs=" << program.covered_labels.size() << " entries=" << entries.size() << "\n";
+    return 0;
+}
+
 int main(int argc, char **argv) {
     try {
+        if (argc == 5 && std::string_view(argv[2]) == "--overlay") {
+            return generate_overlay(argv[1], argv[3], argv[4]);
+        }
         if (argc >= 4 && std::string_view(argv[2]) == "--auto") {
             if (argc > 6) {
                 std::cerr << "Usage: psp_recomp <ELF> --auto <generated_dir> [load_base_hex] [unit_span_bytes]\n";

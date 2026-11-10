@@ -2,6 +2,7 @@
 #include "audio_resampler.hpp"
 #include "vcs_config.hpp"
 
+#include <cstdio>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -26,6 +27,19 @@
 #include <mmsystem.h>
 
 #include <mutex>
+
+namespace {
+// Reports winmm calls that block the calling (guest) thread for 15 ms or more.
+struct SlowCall {
+    explicit SlowCall(const char *name) : name_(name), start_(std::chrono::steady_clock::now()) {}
+    ~SlowCall() {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_).count();
+        if (ms >= 15) std::fprintf(stderr, "[audio-host] %s blocked %lld ms%c", name_, static_cast<long long>(ms), 10);
+    }
+    const char *name_;
+    std::chrono::steady_clock::time_point start_;
+};
+} // namespace
 
 namespace vcs {
 namespace {
@@ -208,7 +222,7 @@ bool ensure_device(AudioState &state) {
 
     // Pause before the first write so playback starts with a real prebuffer,
     // not one tiny buffer followed by an immediate underrun.
-    (void)waveOutPause(state.device);
+    { const SlowCall slow("waveOutPause"); (void)waveOutPause(state.device); }
     state.blocks.resize(kBlockCount);
     state.ring.assign(kRingFrames * kOutputChannels, 0);
     state.next_block = 0u;
@@ -283,7 +297,7 @@ bool queue_one_block(AudioState &state) {
                       << prepare_result << "\n";
         return false;
     }
-    const MMRESULT write_result = waveOutWrite(state.device, &block.header, sizeof(WAVEHDR));
+    MMRESULT write_result; { const SlowCall slow("waveOutWrite"); write_result = waveOutWrite(state.device, &block.header, sizeof(WAVEHDR)); }
     if (write_result != MMSYSERR_NOERROR) {
         if (diagnostics_enabled())
             std::cerr << "[audio-host] waveOutWrite failed code=" << write_result << "\n";
@@ -298,7 +312,8 @@ bool queue_one_block(AudioState &state) {
     const std::size_t target_blocks = state.recovering_from_underrun
         ? state.recovery_prebuffer_blocks : state.prebuffer_blocks;
     if (!state.playback_started && outstanding_blocks(state) >= target_blocks) {
-        if (waveOutRestart(state.device) == MMSYSERR_NOERROR) {
+        MMRESULT restart_result; { const SlowCall slow("waveOutRestart"); restart_result = waveOutRestart(state.device); }
+        if (restart_result == MMSYSERR_NOERROR) {
             state.playback_started = true;
             state.recovering_from_underrun = false;
             if (diagnostics_enabled())
@@ -317,7 +332,7 @@ void advance_locked(AudioState &state, std::uint64_t guest_time_us) {
             // Once waveOut drains completely, immediately writing one block at
             // a time leaves a permanent train of audible gaps. Pause the empty
             // device, build a deeper reserve, then resume continuous playback.
-            (void)waveOutPause(state.device);
+            { const SlowCall slow("waveOutPause"); (void)waveOutPause(state.device); }
             ++state.underrun_rebuffers;
             state.playback_started = false;
             state.recovering_from_underrun = true;

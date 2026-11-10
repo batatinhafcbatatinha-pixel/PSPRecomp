@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <bit>
 #include <array>
 #include <cmath>
@@ -21,6 +22,9 @@
 #include <type_traits>
 #include <limits>
 #include <mutex>
+#include <unordered_map>
+#include <unordered_set>
+#include <iostream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -226,8 +230,12 @@ bool gpu_hardware_transform_enabled() noexcept {
 // PSPRECOMP_GE_GPU_HW_CULL=1 re-enables it for whoever debugs it next.
 bool gpu_hardware_cull_enabled() noexcept {
     static const bool enabled = [] {
+        // CTW: ON by default. Chinatown Wars draws blended layers (clouds, water, light volumes) whose
+        // back faces must be culled; with culling off every other triangle was blended twice, a
+        // diamond pattern over clouds and water. Checked against the intro and airport scenes: no
+        // model goes missing with culling on. PSPRECOMP_GE_GPU_HW_CULL=0 turns it off.
         const char *text = std::getenv("PSPRECOMP_GE_GPU_HW_CULL");
-        return text != nullptr && *text != '\0' && std::strcmp(text, "0") != 0;
+        return text == nullptr || *text == '\0' || std::strcmp(text, "0") != 0;
     }();
     return enabled;
 }
@@ -1846,6 +1854,21 @@ bool decode_model_vertex_for_gpu(const psprecomp::GuestMemory &memory,
     return true;
 }
 
+// GE SHADE (0x50) bit 0: 0 flat, 1 Gouraud. PSPRECOMP_SHADE_DIAG=1 logs each change of the mode,
+// PSPRECOMP_FORCE_SMOOTH=1 ignores flat shading (A/B diagnostics).
+bool ge_flat_shading(const std::array<std::uint32_t, 256> &commands) noexcept {
+    static const bool force_smooth = std::getenv("PSPRECOMP_FORCE_SMOOTH") != nullptr;
+    static const bool diag = std::getenv("PSPRECOMP_SHADE_DIAG") != nullptr;
+    const std::uint32_t value = commands[0x50u];
+    if (diag) {
+        static std::atomic<std::uint32_t> last{0xFFFFFFFFu};
+        static std::atomic<unsigned> printed{0u};
+        if (last.exchange(value) != value && printed.fetch_add(1u) < 200u)
+            std::fprintf(stderr, "[shade] 0x50 word=%08X -> %s\n", value, (value & 1u) ? "smooth" : "flat");
+    }
+    return !force_smooth && (value & 1u) == 0u;
+}
+
 std::uint32_t framebuffer_address(const std::array<std::uint32_t, 256> &commands) noexcept {
     return kVramBase | (data24(commands[0x9Cu]) & 0x001FFFF0u);
 }
@@ -2510,8 +2533,11 @@ bool decode_texture_rgba_into(const psprecomp::GuestMemory &memory,
     };
 
     static const bool parallel_texture_decode = [] {
+        // Off by default: CTW streams hundreds of 256x256 CLUT textures while driving, and fanning
+        // each one out to the shared row pool cost a fixed ~5 ms (workers preempted on a busy
+        // machine hold their chunk for a scheduler quantum) against well under 1 ms serially.
         const char *text = std::getenv("PSPRECOMP_GE_PARALLEL_TEXTURE_DECODE");
-        return text == nullptr || (*text != '\0' && std::strcmp(text, "0") != 0);
+        return text != nullptr && *text != '\0' && std::strcmp(text, "0") != 0;
     }();
     RowWorkerPool &pool = RowWorkerPool::instance();
     // T4 now does much less work per texel, so fan-out is worthwhile at a
@@ -3552,7 +3578,7 @@ bool prepare_screen_triangle(const std::array<std::uint32_t, 256> &commands,
             return false;
         }
     }
-    const bool flat_shading = !clear_mode && (data24(commands[0x50u]) & 1u) == 0u;
+    const bool flat_shading = !clear_mode && ge_flat_shading(commands);
     if (flat_shading && g_collect_ge_render_stats) ++stats.flat_shaded_primitives;
 
     if (!setup.valid) return false;
@@ -3609,7 +3635,7 @@ bool prepare_gpu_only_screen_triangle(const std::array<std::uint32_t, 256> &comm
             return false;
         }
     }
-    const bool flat_shading = !clear_mode && (data24(commands[0x50u]) & 1u) == 0u;
+    const bool flat_shading = !clear_mode && ge_flat_shading(commands);
     if (flat_shading && g_collect_ge_render_stats) ++stats.flat_shaded_primitives;
     prepared.a = a;
     prepared.b = b;
@@ -3851,13 +3877,13 @@ void rasterize_line(psprecomp::GuestMemory &memory,
         rasterize_point(memory, commands, setup, a, true, stats);
         return;
     }
-    if ((data24(commands[0xD3u]) & 1u) == 0u && (data24(commands[0x50u]) & 1u) == 0u)
+    if ((data24(commands[0xD3u]) & 1u) == 0u && ge_flat_shading(commands))
         ++stats.flat_shaded_primitives;
     const FragmentSetup &line_setup = setup;
     const bool line_texture_enabled =
         line_setup.texture_enabled && (data24(commands[0xD3u]) & 1u) == 0u;
     const bool line_flat_shading =
-        (data24(commands[0xD3u]) & 1u) == 0u && (data24(commands[0x50u]) & 1u) == 0u;
+        (data24(commands[0xD3u]) & 1u) == 0u && ge_flat_shading(commands);
     for (std::int32_t i = 0; i <= steps; ++i) {
         const float t = static_cast<float>(i) / static_cast<float>(steps);
         const float one_minus_t = 1.0f - t;
@@ -4189,6 +4215,120 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
             gpu_draw.texture_content_signature = any_signature ? signature : 0u;
         }
         ge_gpu_backend_record_draw(gpu_draw);
+        // PSPRECOMP_DSTALPHA_DIAG=1: when a draw blends with destination alpha (PSP stencil), dump the GE
+        // state of it and of the 8 draws before it (first 6 occurrences).
+        if (static const bool dst_diag = std::getenv("PSPRECOMP_DSTALPHA_DIAG") != nullptr; dst_diag) {
+            static std::mutex ring_mutex;
+            static std::array<std::string, 8> ring;
+            static unsigned ring_next = 0u, dumps = 0u;
+            char line[300];
+            const auto c = [&](std::uint32_t i) { return data24(commands[i]); };
+            std::snprintf(line, sizeof line,
+                          "fb=%06X prim=%u n=%u tex=%d ABE=%u blend=%06X fix=%06X/%06X ATE=%u atest=%06X STE=%u "
+                          "sfunc=%06X sop=%06X pmskc=%06X pmska=%06X zte=%u zmsk=%u clear=%06X vtype=%06X",
+                          gpu_draw.framebuffer_address & 0x1FFFF0u, primitive, count, gpu_draw.texture_enabled ? 1 : 0,
+                          c(0x21u) & 1u, c(0xDFu), c(0xE0u), c(0xE1u), c(0x22u) & 1u, c(0xDBu), c(0x24u) & 1u,
+                          c(0xDCu), c(0xDDu), c(0xE8u), c(0xE9u), c(0x23u) & 1u, c(0xE7u), c(0xD3u), c(0x12u));
+            std::lock_guard lock(ring_mutex);
+            const bool uses_dst_alpha = gpu_draw.blend_enabled &&
+                ((gpu_draw.blend_source_factor & 0xFu) == 4u || (gpu_draw.blend_source_factor & 0xFu) == 5u ||
+                 (gpu_draw.blend_dest_factor & 0xFu) == 4u || (gpu_draw.blend_dest_factor & 0xFu) == 5u);
+            if (uses_dst_alpha && dumps < 6u) {
+                ++dumps;
+                std::fprintf(stderr, "[dstalpha] ---- occurrence %u\n", dumps);
+                for (unsigned k = 0u; k < ring.size(); ++k) {
+                    const std::string &old = ring[(ring_next + k) % ring.size()];
+                    if (!old.empty()) std::fprintf(stderr, "[dstalpha] prev %s\n", old.c_str());
+                }
+                std::fprintf(stderr, "[dstalpha] THIS %s\n", line);
+            }
+            ring[ring_next] = line;
+            ring_next = (ring_next + 1u) % ring.size();
+        }
+        // PSPRECOMP_GE_VRAMTEX_DIAG=1: log the distinct draws that sample VRAM (render-to-texture /
+        // framebuffer feedback), with the target framebuffer, so GPU-backend gaps can be matched.
+        if (static const bool vram_diag = std::getenv("PSPRECOMP_GE_VRAMTEX_DIAG") != nullptr;
+            vram_diag && gpu_draw.texture_enabled && (gpu_draw.texture_address & 0x0F000000u) == 0x04000000u) {
+            static std::mutex diag_mutex;
+            static std::unordered_set<std::uint64_t> seen;
+            const std::uint64_t key = (std::uint64_t{gpu_draw.texture_address & 0x001FFFF0u} << 32u) ^
+                (std::uint64_t{gpu_draw.framebuffer_address & 0x001FFFF0u} << 4u) ^ gpu_draw.texture_format ^
+                (std::uint64_t{gpu_draw.through} << 62u);
+            std::lock_guard lock(diag_mutex);
+            if (seen.size() < 256u && seen.insert(key).second)
+                std::cerr << "[vramtex] tex=0x" << std::hex << gpu_draw.texture_address << " tfmt=" << gpu_draw.texture_format
+                          << " tw=" << std::dec << gpu_draw.texture_width << 'x' << gpu_draw.texture_height
+                          << " bufw=" << gpu_draw.texture_buffer_width << " fb=0x" << std::hex
+                          << gpu_draw.framebuffer_address << " fbw=" << std::dec << gpu_draw.framebuffer_stride
+                          << " fbfmt=" << gpu_draw.framebuffer_format << " through=" << gpu_draw.through
+                          << " prim=" << primitive << " n=" << count << " feedback="
+                          << ge_gpu_backend_is_framebuffer_feedback_texture(gpu_draw) << '\n';
+        }
+        // PSPRECOMP_GE_SKIP_VRAMTEX=tex:fb[,tex:fb...] (hex VRAM offsets): drop those feedback draws (A/B tests).
+        static const std::vector<std::pair<std::uint32_t, std::uint32_t>> skip_vramtex = [] {
+            std::vector<std::pair<std::uint32_t, std::uint32_t>> list;
+            if (const char *text = std::getenv("PSPRECOMP_GE_SKIP_VRAMTEX")) {
+                for (const char *p = text; *p;) {
+                    char *end = nullptr;
+                    const auto tex = static_cast<std::uint32_t>(std::strtoul(p, &end, 16));
+                    if (end == p || *end != ':') break;
+                    p = end + 1;
+                    const auto fb = static_cast<std::uint32_t>(std::strtoul(p, &end, 16));
+                    if (end == p) break;
+                    list.emplace_back(tex & 0x001FFFF0u, fb & 0x001FFFF0u);
+                    p = *end == ',' ? end + 1 : end;
+                }
+            }
+            return list;
+        }();
+        // GPU targets hold pixels, not PSP memory, and the DX12 backend gives each VRAM address a single
+        // logical size per frame. CTW's bloom reuses the same two buffers for every level of its pyramid
+        // (0x110000 is drawn 256 wide, then 64 wide; 0x132000 128 and 32), which that model cannot hold:
+        // the levels land on top of each other and the composite washes the screen out to white. A target
+        // that has been drawn with more than one stride is treated as aliased and the passes that sample
+        // it are skipped on the GPU path (the scene stays, the glow goes). The software renderer keeps
+        // them. PSPRECOMP_GE_KEEP_ALIASED_FEEDBACK=1 keeps them on the GPU too.
+        if (gpu_backend_enabled) {
+            static std::mutex stride_mutex;
+            static std::unordered_map<std::uint32_t, std::uint32_t> written_stride;
+            static std::unordered_set<std::uint32_t> aliased;
+            static std::uint32_t last_target = ~0u, last_stride = ~0u;
+            static const bool keep_aliased = std::getenv("PSPRECOMP_GE_KEEP_ALIASED_FEEDBACK") != nullptr;
+            const std::uint32_t target = gpu_draw.framebuffer_address & 0x001FFFF0u;
+            std::lock_guard lock(stride_mutex);
+            if (static const char *seq = std::getenv("PSPRECOMP_GE_STRIDE_SEQ"); seq != nullptr) {
+                static unsigned printed = 0u;
+                const std::uint32_t watch = static_cast<std::uint32_t>(std::strtoul(seq, nullptr, 16)) & 0x001FFFF0u;
+                if (printed < 400u && (target == watch || (gpu_draw.texture_enabled &&
+                        (gpu_draw.texture_address & 0x001FFFF0u) == watch))) {
+                    ++printed;
+                    std::cerr << "[strideseq] fb=0x" << std::hex << target << " stride=" << std::dec
+                              << gpu_draw.framebuffer_stride << " tex=" << gpu_draw.texture_enabled << " 0x" << std::hex
+                              << (gpu_draw.texture_address & 0x001FFFF0u) << " bufw=" << std::dec
+                              << gpu_draw.texture_buffer_width << " clear=" << gpu_draw.clear_mode << " prim=" << primitive
+                              << " n=" << count << '\n';
+                }
+            }
+            if (gpu_draw.framebuffer_stride != 0u &&
+                (target != last_target || gpu_draw.framebuffer_stride != last_stride)) {
+                last_target = target;
+                last_stride = gpu_draw.framebuffer_stride;
+                const auto [slot, inserted] = written_stride.try_emplace(target, gpu_draw.framebuffer_stride);
+                if (!inserted && slot->second != gpu_draw.framebuffer_stride && aliased.insert(target).second)
+                    std::cerr << "[ge] target 0x" << std::hex << target << std::dec
+                              << " drawn with several strides: the GPU path skips passes that sample it" << '\n';
+            }
+            if (!keep_aliased && gpu_draw.texture_enabled && !aliased.empty() &&
+                (gpu_draw.texture_address & 0x0F000000u) == 0x04000000u &&
+                aliased.count(gpu_draw.texture_address & 0x001FFFF0u) != 0u &&
+                ge_gpu_backend_is_framebuffer_feedback_texture(gpu_draw))
+                return true;
+        }
+        if (!skip_vramtex.empty() && gpu_draw.texture_enabled) {
+            for (const auto &[tex, fb] : skip_vramtex)
+                if ((gpu_draw.texture_address & 0x001FFFF0u) == tex && (gpu_draw.framebuffer_address & 0x001FFFF0u) == fb)
+                    return true;
+        }
         if (!gpu_draw.through && !gpu_draw.clear_mode &&
             primitive >= 3u && primitive <= 5u) {
             const std::array<float, 6> cloud_viewport{
@@ -4291,6 +4431,7 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
             }
             total_bytes += static_cast<std::size_t>(bytes);
         }
+        const auto tex_t0 = std::chrono::steady_clock::now();
         std::vector<std::byte> decoded;
         if (all) {
             try { decoded.resize(total_bytes); } catch (...) { all = false; }
@@ -4307,9 +4448,19 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
             offset += bytes;
         }
         if (all) {
+            const auto tex_t1 = std::chrono::steady_clock::now();
             (void)ge_gpu_backend_upload_decoded_texture_chain_packed(
                 gpu_draw, mip_setups[0].width, mip_setups[0].height,
                 level_count, std::move(decoded));
+            // PSPRECOMP_TEXSLOW_DIAG=1 (or the frame-time diag): name uploads over 5 ms.
+            static const bool tex_diag = std::getenv("PSPRECOMP_TEXSLOW_DIAG") != nullptr ||
+                                         std::getenv("PSPRECOMP_FRAME_TIME_DIAG") != nullptr;
+            const auto tex_t2 = std::chrono::steady_clock::now();
+            if (tex_diag && tex_t2 - tex_t0 > std::chrono::milliseconds(5))
+                std::fprintf(stderr, "[texslow] fmt=%u %ux%u levels=%u decode_us=%lld prepare_us=%lld\n",
+                             gpu_draw.texture_format, mip_setups[0].width, mip_setups[0].height, level_count,
+                             static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(tex_t1 - tex_t0).count()),
+                             static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(tex_t2 - tex_t1).count()));
         } else {
             (void)ge_gpu_backend_upload_decoded_texture(gpu_draw, 0u, 0u, {});
         }
@@ -4502,7 +4653,7 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
                 prepared_lighting, *fast_0115_world_normal_ptr, gpu_light_mul, gpu_light_add);
         }
         const bool cpu_lighting_effective = hw_lighting_on_cpu && !gpu_directional_lighting;
-        const bool flat_shading = (data24(commands[0x50u]) & 1u) == 0u;
+        const bool flat_shading = ge_flat_shading(commands);
         GeGpuHardwareTransform hw =
             build_gpu_hardware_transform(commands, transform, cpu_lighting_effective,
                                          uv_generation == 1u || uv_generation == 2u);

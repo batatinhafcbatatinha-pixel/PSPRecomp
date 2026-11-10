@@ -85,6 +85,8 @@ constexpr KeyBinding kKeyBindings[] = {
     {'Q', kPspLeft},           // Previous weapon / radio station
     {'E', kPspRight},          // Next weapon / radio station
     {'H', kPspLTrigger},       // Horn
+    {'Z', kPspLTrigger},       // L1 / R1 (CTW: alternate them to kick out of the sinking car)
+    {'C', kPspRTrigger},
     // The arrow keys stay on the D-pad: menus are navigated with them, and the
     // PSP D-pad is what the game's own front end reads.
     {VK_UP, kPspUp},           {VK_DOWN, kPspDown},
@@ -728,28 +730,40 @@ HostInputState display_window_input() {
 
     HostInputState input{};
     const auto publish = [&]() -> HostInputState & { cached = input; return cached; };
-    if (!display_window_enabled()) return publish();
-    WindowState &state = window_state();
-    if (!state.ready.load(std::memory_order_acquire)) return publish();
-
     // PSPRECOMP_PAD_FILE=<file>: scripted input for unattended tests. The file holds one hex mask of PSP buttons
-    // (0x4000 cross, 0x8 start, 0x1000 triangle, 0x10/0x40/0x80/0x20 up/down/left/right ...), re-read every 30 ms
+    // (works without a window too; 0x4000 cross, 0x8 start, 0x1000 triangle, 0x10/0x40/0x80/0x20 up/down/left/right ...), re-read every 30 ms
     // and OR-ed in whether or not the window has focus. "0" releases everything.
     if (static const char *pad_file = std::getenv("PSPRECOMP_PAD_FILE"); pad_file && *pad_file) {
         static std::uint32_t file_buttons = 0;
+        static unsigned file_x = 128u, file_y = 128u;
         static ULONGLONG file_read_at = 0;
         const ULONGLONG tick = GetTickCount64();
         if (tick - file_read_at >= 30) {
             file_read_at = tick;
             if (FILE *f = std::fopen(pad_file, "r")) {
                 char text[32] = {};
-                if (std::fgets(text, sizeof text, f))
-                    file_buttons = static_cast<std::uint32_t>(std::strtoul(text, nullptr, 16));
+                if (std::fgets(text, sizeof text, f)) {
+                    // "<hex buttons> [<x> <y>]": optional analog stick, decimal 0..255 (128 = centre).
+                    char *end = nullptr;
+                    file_buttons = static_cast<std::uint32_t>(std::strtoul(text, &end, 16));
+                    char *end_x = nullptr;
+                    const unsigned long x = std::strtoul(end, &end_x, 10);
+                    file_x = end_x != end ? static_cast<unsigned>((std::min)(x, 255ul)) : 128u;
+                    file_y = end_x != end ? static_cast<unsigned>((std::min)(std::strtoul(end_x, nullptr, 10), 255ul)) : 128u;
+                }
                 std::fclose(f);
             }
         }
         input.buttons |= file_buttons;
+        if (file_x != 128u || file_y != 128u) {
+            input.analog_x = static_cast<std::uint8_t>(file_x);
+            input.analog_y = static_cast<std::uint8_t>(file_y);
+        }
     }
+    if (!display_window_enabled()) return publish();
+    WindowState &state = window_state();
+    if (!state.ready.load(std::memory_order_acquire)) return publish();
+
 
     // The mouse keeps accumulating while the window is not focused, so the
     // deltas are drained either way. Leaving them to pile up made the camera

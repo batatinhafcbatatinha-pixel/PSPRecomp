@@ -966,6 +966,29 @@ std::uint32_t next_mpeg_stream_id{1u};
 std::array<AudioChannelState, 9> audio_channels{};
 std::uint64_t virtual_time_us{};
 
+// PSPRECOMP_HOST_SLOW_MS=<n>: name host-side sections that take n ms or more of wall time.
+struct HostSlowSection {
+    static long threshold() {
+        static const long value = [] {
+            const char *text = std::getenv("PSPRECOMP_HOST_SLOW_MS");
+            return text != nullptr ? std::strtol(text, nullptr, 10) : 0L;
+        }();
+        return value;
+    }
+    explicit HostSlowSection(const char *name) : name_(name), active_(threshold() > 0) {
+        if (active_) start_ = std::chrono::steady_clock::now();
+    }
+    ~HostSlowSection() {
+        if (!active_) return;
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_).count();
+        if (ms >= threshold()) std::fprintf(stderr, "[host-slow] %s %lld ms%c", name_, static_cast<long long>(ms), 10);
+    }
+    const char *name_;
+    bool active_;
+    std::chrono::steady_clock::time_point start_{};
+};
+
 constexpr std::uint32_t kGuestFrameLimiterBranch = 0x08A070C8u;
 constexpr std::uint32_t kGuestFrameLimiterContinue = 0x08A070D0u;
 constexpr std::int32_t kGuestFrameCounterGpOffset = -8852;
@@ -1073,6 +1096,7 @@ struct GuestCallbackInvocation {
     std::uint32_t a0{};
     std::uint32_t a1{};
     std::uint32_t a2{};
+    std::uint64_t not_before_us{}; // virtual time before which a new chain may not start
 };
 
 GeState ge_state{};
@@ -1092,6 +1116,9 @@ std::uint64_t ge_lighting_state_revision = 1u;
 std::uint64_t ge_camera_state_revision = 1u;
 GeListTable ge_list_table{};
 std::unordered_map<std::int32_t, std::vector<GuestCallbackInvocation>> pending_guest_callbacks;
+// GE callbacks waiting for their completion time (see queue_guest_callback_chain). Like the PSP's GE
+// interrupt they run on whichever thread is executing once due, not necessarily the submitter.
+std::vector<GuestCallbackInvocation> deferred_ge_callbacks;
 
 // Stage 45.7: the PSP GE is an independent processor.  Previous stages executed
 // the complete display list inside sceGeListEnQueue(), serializing translated
@@ -3051,14 +3078,20 @@ void promote_expired_delays() {
 void (*dump_mutex_waiters_hook)() = nullptr;
 // PSPRECOMP_WAIT_DUMP=<seconds>: periodic wall-clock dump of every guest
 // thread's state and where each waiter is parked (pc/ra/sp of its context).
+psprecomp::Runtime *wait_dump_runtime = nullptr;
+bool force_wait_dump = false;
+std::uint64_t idle_jumped_since_vblank_us = 0u;
 void maybe_dump_waits() {
     static const char *env = std::getenv("PSPRECOMP_WAIT_DUMP");
-    if (env == nullptr) return;
-    static const double period = std::max(1.0, std::atof(env));
-    static auto last = std::chrono::steady_clock::now();
-    const auto now = std::chrono::steady_clock::now();
-    if (std::chrono::duration<double>(now - last).count() < period) return;
-    last = now;
+    if (!force_wait_dump) {
+        if (env == nullptr) return;
+        static const double period = std::max(1.0, std::atof(env));
+        static auto last = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now - last).count() < period) return;
+        last = now;
+    }
+    force_wait_dump = false;
     static const char *names[] = {"created", "ready", "running", "sleeping", "delayed", "io", "done"};
     std::cerr << "[waitdump] vt=" << virtual_time_us << " cur=" << thread_table.current_uid << "\n";
     for (const auto &[uid, t] : thread_table.threads) {
@@ -3086,10 +3119,22 @@ void maybe_dump_waits() {
         for (const auto &w : list)
             std::cerr << "[waitdump] join " << tuid << " waiter=" << w.uid << " pc=" << psprecomp::hex32(w.context.pc) << "\n";
     if (dump_mutex_waiters_hook != nullptr) dump_mutex_waiters_hook();
+    // CTW display/GE handshake globals (vblank handler 0x0890E3D8, SysManager gate 0x08A752AC).
+    if (wait_dump_runtime != nullptr) {
+        auto &memory = wait_dump_runtime->memory();
+        const auto word = [&](std::uint32_t address) { return memory.contains(address, 4u) ? memory.load32(address) : 0xDEADDEADu; };
+        std::fprintf(stderr, "[waitdump] ctw gate=%08X busy=%08X pending=%08X done=%08X vbl=%08X/%08X g7060=%08X\n",
+                     word(0x08B58FB4u), word(0x08B58F94u), word(0x08B58F98u), word(0x08B58FA8u),
+                     word(0x08B58FACu), word(0x08B58FB0u), word(0x08B58FA0u));
+    }
 }
 
 bool activate_next_thread(psprecomp::AllegrexContext &ctx, const char *reason) {
+    const HostSlowSection slow_section("activate_next_thread");
     const std::int32_t previous_uid = thread_table.current_uid;
+    // The running thread is giving up the CPU: the GE has had time to finish, so its pending
+    // callbacks are due (they run on whichever thread executes next, like the PSP's GE interrupt).
+    for (auto &callback : deferred_ge_callbacks) callback.not_before_us = 0u;
     maybe_dump_waits();
     promote_expired_delays();
     thread_table.continuations.erase(
@@ -3101,27 +3146,57 @@ bool activate_next_thread(psprecomp::AllegrexContext &ctx, const char *reason) {
         thread_table.continuations.end());
     while (thread_table.continuations.empty()) {
         std::uint64_t earliest = UINT64_MAX;
-        for (const auto &[uid, thread] : thread_table.threads) {
-            (void)uid;
-            if (thread.state == ThreadState::Delayed)
-                earliest = std::min(earliest, thread.delay_until_us);
-        }
-        auto consider_timeouts = [&](const auto &objects) {
-            for (const auto &[uid, object] : objects) {
-                (void)uid;
-                for (const auto &waiter : object.waiters)
-                    if (waiter.timeout_ptr != 0u)
-                        earliest = std::min(earliest, waiter.deadline);
+        // PSPRECOMP_IDLE_DIAG=1: name the wakeup behind every idle jump of 100 ms or more.
+        static const bool idle_diag = std::getenv("PSPRECOMP_IDLE_DIAG") != nullptr ||
+                                      std::getenv("PSPRECOMP_FRAME_TIME_DIAG") != nullptr;
+        char source[160] = "";
+        const auto note = [&](std::uint64_t deadline, const char *kind, std::int32_t object, std::int32_t thread,
+                              std::uint32_t pc, std::uint32_t ra) {
+            if (deadline < earliest) {
+                earliest = deadline;
+                if (idle_diag)
+                    std::snprintf(source, sizeof source, "%s obj=0x%X thread=%d pc=0x%08X ra=0x%08X", kind,
+                                  static_cast<unsigned>(object), thread, pc, ra);
             }
         };
-        consider_timeouts(semaphore_table.semaphores);
-        consider_timeouts(event_flag_table.flags);
+        for (const auto &[uid, thread] : thread_table.threads) {
+            if (thread.state == ThreadState::Delayed)
+                note(thread.delay_until_us, "delay", 0, uid, 0u, 0u);
+        }
+        auto consider_timeouts = [&](const auto &objects, const char *kind) {
+            for (const auto &[uid, object] : objects) {
+                for (const auto &waiter : object.waiters)
+                    if (waiter.timeout_ptr != 0u)
+                        note(waiter.deadline, kind, uid, waiter.uid, waiter.context.pc, waiter.context.gpr[31]);
+            }
+        };
+        consider_timeouts(semaphore_table.semaphores, "sema-timeout");
+        consider_timeouts(event_flag_table.flags, "eventflag-timeout");
         for (const auto &wait : timed_waits) {
             const auto thread = thread_table.threads.find(wait.uid);
             if (thread != thread_table.threads.end() && thread->second.wait_token == wait.token)
-                earliest = std::min(earliest, wait.deadline);
+                note(wait.deadline, "timed-wait", 0, wait.uid, 0u, 0u);
         }
         if (earliest == UINT64_MAX) break;
+        if (idle_diag) {
+            // A long idle stretch with no vblank wait from the game: dump every thread once (300 ms).
+            const std::uint64_t before = idle_jumped_since_vblank_us;
+            idle_jumped_since_vblank_us += earliest - std::min(earliest, virtual_time_us);
+            if (before / 400000u != idle_jumped_since_vblank_us / 400000u &&
+                idle_jumped_since_vblank_us / 400000u <= 5u) {
+                std::fprintf(stderr, "[idle] long idle without a vblank wait; thread dump follows\n");
+                force_wait_dump = true;
+                maybe_dump_waits();
+            }
+        }
+        if (idle_diag && earliest > virtual_time_us + 2000u) {
+            // Small jumps add up (CTW spun 2 s of guest time in ~0.4 s): log every jump over 2 ms,
+            // capped, so the waiter that keeps the machine idle can be named.
+            static unsigned printed = 0u;
+            if (printed++ < 4000u)
+                std::fprintf(stderr, "[idle] jump %llu us to %s\n",
+                             static_cast<unsigned long long>(earliest - virtual_time_us), source);
+        }
         // The recomp runtime uses deterministic virtual PSP time. When no
         // thread is runnable, advance directly to the next kernel wakeup.
         // An externally suspended waiter may expire without becoming runnable.
@@ -3197,8 +3272,53 @@ psprecomp::AllegrexContext make_wait_context(const psprecomp::AllegrexContext &c
     return suspended;
 }
 
+// The PSP raises the VBLANK interrupt every frame whether or not any thread
+// waits for it.  The HLE normally runs the game's VBLANK sub-interrupt handler
+// inside sceDisplayWaitVblank*; when no thread has waited for a vblank for two
+// periods (e.g. the frame thread was deleted and the game paces itself with
+// sceKernelDelayThread), fire it from the next delay call instead.  The
+// interrupted delay returns immediately, which delay loops tolerate.
+std::uint64_t last_waited_vblank_us = 0u;
+std::uint64_t next_synthetic_vblank_us = 0u;
+
+bool seen_real_vblank_wait = false;
+bool fire_synthetic_vblank(psprecomp::AllegrexContext &ctx) {
+    const HostSlowSection slow_section("fire_synthetic_vblank");
+    // PSPRECOMP_SYNTH_VBLANK: 1 (default) always, "boot" only until the game's first real vblank
+    // wait, 0 never. A/B switch for the CTW driving stalls (118 synthetic vblanks in one stall).
+    static const int mode = [] {
+        const char *text = std::getenv("PSPRECOMP_SYNTH_VBLANK");
+        if (text == nullptr || *text == '\0') return 1;
+        if (std::strcmp(text, "boot") == 0) return 2;
+        return std::strcmp(text, "0") == 0 ? 0 : 1;
+    }();
+    if (mode == 0 || (mode == 2 && seen_real_vblank_wait)) return false;
+    const std::uint64_t period = virtual_vblank_period_us();
+    if (period == 0u || virtual_time_us < last_waited_vblank_us + 2u * period ||
+        virtual_time_us < next_synthetic_vblank_us) return false;
+    const auto interrupt = sub_interrupts.find(sub_interrupt_key(30u, 15u));
+    if (interrupt == sub_interrupts.end() || !interrupt->second.enabled || interrupt->second.handler == 0u)
+        return false;
+    if (const auto frames = async_return_frames.find(thread_table.current_uid);
+        frames != async_return_frames.end() && !frames->second.empty()) return false;
+    next_synthetic_vblank_us = (virtual_time_us / period + 1u) * period;
+    ++display_vblank_index;
+    async_return_frames[thread_table.current_uid].push_back(
+        AsyncReturnFrame{AsyncReturnKind::SubInterrupt, make_wait_context(ctx)});
+    ctx.set_gpr(4, 15u);
+    ctx.set_gpr(5, interrupt->second.argument);
+    ctx.set_gpr(31, 0x00000004u);
+    ctx.pc = interrupt->second.handler;
+    interrupt->second.occurred = true;
+    if (static const bool diag = std::getenv("PSPRECOMP_GE_DIAG") != nullptr ||
+                                 std::getenv("PSPRECOMP_FRAME_TIME_DIAG") != nullptr; diag)
+        std::cerr << "[intr] synthetic vblank " << display_vblank_index << " uid=" << thread_table.current_uid << "\n";
+    return true;
+}
+
 bool delay_current_thread(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx,
                           std::uint32_t delay_microseconds, std::uint32_t return_value = 0u) {
+    if (fire_synthetic_vblank(ctx)) return true;
     auto current = thread_table.threads.find(thread_table.current_uid);
     if (current == thread_table.threads.end()) {
         ctx.set_gpr(2, 0x80020198u);
@@ -3578,7 +3698,7 @@ bool start_next_guest_callback(psprecomp::AllegrexContext &ctx, bool begin_chain
     ctx.set_gpr(6, invocation.a2);
     ctx.set_gpr(31, 0x00000004u);
     ctx.pc = invocation.function;
-    if (std::getenv("PSPRECOMP_GE_DIAG") != nullptr || std::getenv("PSPRECOMP_SCHED_DIAG") != nullptr) {
+    if (std::getenv("PSPRECOMP_GE_DIAG") != nullptr || std::getenv("PSPRECOMP_SCHED_DIAG") != nullptr || std::getenv("PSPRECOMP_CALLBACK_DIAG") != nullptr) {
         std::cerr << "[callback] start uid=" << uid
                   << " function=" << psprecomp::hex32(invocation.function)
                   << " a0=" << psprecomp::hex32(invocation.a0)
@@ -3595,6 +3715,14 @@ bool maybe_start_pending_guest_callback(psprecomp::AllegrexContext &ctx) {
     if (thread == thread_table.threads.end() || thread->second.state != ThreadState::Running) return false;
     const auto frames = async_return_frames.find(thread_table.current_uid);
     if (frames != async_return_frames.end() && !frames->second.empty()) return false;
+    if (!deferred_ge_callbacks.empty() && deferred_ge_callbacks.front().not_before_us <= virtual_time_us) {
+        // Hand every due GE callback to the running thread, in submission order.
+        auto &pending = pending_guest_callbacks[thread_table.current_uid];
+        std::size_t due = 0u;
+        while (due < deferred_ge_callbacks.size() && deferred_ge_callbacks[due].not_before_us <= virtual_time_us) ++due;
+        pending.insert(pending.end(), deferred_ge_callbacks.begin(), deferred_ge_callbacks.begin() + static_cast<std::ptrdiff_t>(due));
+        deferred_ge_callbacks.erase(deferred_ge_callbacks.begin(), deferred_ge_callbacks.begin() + static_cast<std::ptrdiff_t>(due));
+    }
     return start_next_guest_callback(ctx, true);
 }
 
@@ -3606,9 +3734,27 @@ void queue_guest_callback_chain(psprecomp::AllegrexContext &ctx,
     }), callbacks.end());
     ctx = resume;
     if (callbacks.empty()) return;
+    // The GE renders in parallel on a PSP: a list's FINISH/SIGNAL callbacks arrive some time after
+    // sceGeListEnQueue returns. Lists execute synchronously here, so without a delay the callback ran
+    // before the CPU went on. CTW's main thread starts its memory-stick worker right after a frame is
+    // queued and the worker sleeps until the GE finish callback wakes it; firing the callback first
+    // lost that wakeup and the game stalled ~2 s (every autosave/memory-stick check).
+    // PSPRECOMP_GE_CALLBACK_LATENCY_US (default 0 = immediate) sets the delay in guest time. EXPERIMENTAL:
+    // 1000-5000 us removed the memstick stall but stretched Bink intro frames to 16-20 s of guest time.
+    static const std::uint64_t latency_us = [] {
+        const char *text = std::getenv("PSPRECOMP_GE_CALLBACK_LATENCY_US");
+        return text != nullptr && *text != '\0' ? std::strtoull(text, nullptr, 10) : 0ull;
+    }();
+    if (latency_us != 0u) {
+        for (auto &callback : callbacks) {
+            callback.not_before_us = virtual_time_us + latency_us;
+            deferred_ge_callbacks.push_back(callback);
+        }
+        return;
+    }
     auto &pending = pending_guest_callbacks[thread_table.current_uid];
     pending.insert(pending.end(), callbacks.begin(), callbacks.end());
-    if (std::getenv("PSPRECOMP_GE_DIAG") != nullptr || std::getenv("PSPRECOMP_SCHED_DIAG") != nullptr) {
+    if (std::getenv("PSPRECOMP_GE_DIAG") != nullptr || std::getenv("PSPRECOMP_SCHED_DIAG") != nullptr || std::getenv("PSPRECOMP_CALLBACK_DIAG") != nullptr) {
         std::cerr << "[callback] queued uid=" << thread_table.current_uid
                   << " count=" << callbacks.size()
                   << " total=" << pending.size()
@@ -4198,6 +4344,31 @@ bool gpu_color_preview_enabled() noexcept {
 }
 
 void dump_gpu_internal_frame_if_requested(std::uint64_t vblank) {
+    // PSPRECOMP_GE_GPU_DUMP_DIR=<dir> (+ PSPRECOMP_DX12_GE_READBACK=1): save the GPU frame every
+    // PSPRECOMP_GE_GPU_DUMP_EVERY vblanks (default 60) as <dir>/gpu_<vblank>.ppm, for unattended tests.
+    static const char *series_dir = std::getenv("PSPRECOMP_GE_GPU_DUMP_DIR");
+    if (series_dir != nullptr && *series_dir != 0) {
+        static const std::uint64_t every = std::max<std::uint64_t>(1u, parse_environment_u64("PSPRECOMP_GE_GPU_DUMP_EVERY") == 0u
+            ? 60u : parse_environment_u64("PSPRECOMP_GE_GPU_DUMP_EVERY"));
+        static std::uint64_t last = 0u;
+        if (vblank < last + every) return;
+        const GeGpuBackendReport report = ge_gpu_backend_report();
+        if (report.offscreen_width == 0u || report.offscreen_height == 0u || report.game_frame_readback_bytes == 0u) return;
+        std::vector<std::byte> rgba(report.game_frame_readback_bytes);
+        if (!ge_gpu_backend_copy_game_frame_rgba(rgba)) return;
+        last = vblank;
+        char name[64];
+        std::snprintf(name, sizeof name, "gpu_%06llu.ppm", static_cast<unsigned long long>(vblank));
+        std::ofstream output(std::filesystem::path(series_dir) / name, std::ios::binary | std::ios::trunc);
+        if (!output) return;
+        output << "P6" << char(10) << report.offscreen_width << char(32) << report.offscreen_height << char(10) << "255" << char(10);
+        std::vector<char> rgb(rgba.size() / 4u * 3u);
+        for (std::size_t i = 0u, o = 0u; i + 3u < rgba.size(); i += 4u, o += 3u) {
+            rgb[o] = static_cast<char>(rgba[i]); rgb[o + 1u] = static_cast<char>(rgba[i + 1u]); rgb[o + 2u] = static_cast<char>(rgba[i + 2u]);
+        }
+        output.write(rgb.data(), static_cast<std::streamsize>(rgb.size()));
+        return;
+    }
     static bool dumped = false;
     const std::uint64_t requested = gpu_dump_vblank();
     if (dumped || requested == 0u || vblank < requested) return;
@@ -4401,8 +4572,21 @@ void limit_frame_rate() {
         return;
     }
 
-    const auto target = wall_anchor + std::chrono::microseconds(virtual_time_us - guest_anchor);
+    auto target = wall_anchor + std::chrono::microseconds(virtual_time_us - guest_anchor);
     const auto now = std::chrono::steady_clock::now();
+    // Guest time can run far ahead of the wall clock in one frame: a polling loop credits a
+    // starvation tick per dispatch, and CTW spun ~2 s of guest time in 0.3 s of host time. Paying
+    // that back here froze the picture for 1.7 s. Sleep at most a few periods and re-anchor the rest.
+    if (const auto max_sleep = std::chrono::microseconds(virtual_vblank_period_us() * 4u);
+        target - now > max_sleep) {
+        static const bool diag = std::getenv("PSPRECOMP_FRAME_TIME_DIAG") != nullptr;
+        if (diag)
+            std::fprintf(stderr, "[pacing] guest ahead by %lld us; re-anchored\n",
+                         static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(target - now).count()));
+        wall_anchor = now;
+        guest_anchor = virtual_time_us;
+        target = now + std::chrono::microseconds(virtual_vblank_period_us());
+    }
     if (now >= target) {
         // The selected rate is a ceiling, not a promise that this renderer can
         // finish inside the budget. When it misses, advance guest time by the
@@ -5220,7 +5404,17 @@ void complete_current_thread(psprecomp::Runtime &runtime, psprecomp::AllegrexCon
 }
 
 void vcs_module_thread_return(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
+    const std::int32_t uid = thread_table.current_uid;
     complete_current_thread(runtime, ctx);
+    // The loader deletes the module_start thread once it returns, so its stack is
+    // free again (sceKernelMaxFreeMemSize must count it).
+    if (auto done = thread_table.threads.find(uid);
+        done != thread_table.threads.end() && done->second.state == ThreadState::Completed &&
+        done->second.name == "module_start") {
+        release_thread_stack(done->second);
+        done->second.stack_bottom = 0u;
+        done->second.stack_top = 0u;
+    }
 }
 
 bool continue_mpeg_ringbuffer_callback(psprecomp::Runtime &runtime,
@@ -5995,6 +6189,7 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
         ge_async.last_wait_ns.store(0u, std::memory_order_release);
     }
     pending_guest_callbacks.clear();
+    deferred_ge_callbacks.clear();
     async_return_frames.clear();
     display_state = DisplayState{};
     display_vblank_index = 0u;
@@ -6212,9 +6407,23 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             }
         });
 
-    runtime.register_hle("ThreadManForUser", 0x809CE29Bu,
+    runtime.register_hle("ThreadManForUser", 0x809CE29Bu, // sceKernelExitDeleteThread
         [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            // Exit *and delete*: the PSP frees the thread's stack back to the user
+            // partition.  Keeping it reserved shrank sceKernelMaxFreeMemSize, and
+            // Chinatown Wars sizes its whole game heap from that value.
+            const std::int32_t uid = thread_table.current_uid;
+            if (auto current = thread_table.threads.find(uid); current != thread_table.threads.end())
+                current->second.exit_status = ctx.gpr[4];
             complete_current_thread(rt, ctx);
+            if (uid != 0) {
+                if (auto done = thread_table.threads.find(uid);
+                    done != thread_table.threads.end() && done->second.state == ThreadState::Completed) {
+                    remove_thread_from_wait_queues(uid);
+                    release_thread_stack(done->second);
+                    thread_table.threads.erase(done);
+                }
+            }
         });
 
     runtime.register_hle("ThreadManForUser", 0x383F7BCCu,
@@ -6511,14 +6720,55 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             set_success(ctx);
         });
 
+    // "CB" waits run the calling thread's notified callbacks first, as the PSP
+    // kernel does.  The callback returns to just after the wait call (v0 = 0),
+    // so the wait ends early; game wait loops simply wait again.
+    auto deliver_callback = [](psprecomp::AllegrexContext &ctx) -> bool {
+        auto pending = std::find_if(callback_table.callbacks.begin(), callback_table.callbacks.end(),
+            [](const auto &item) {
+                return item.second.owner_uid == thread_table.current_uid &&
+                    item.second.notify_count != 0u && item.second.function != 0u;
+            });
+        if (pending == callback_table.callbacks.end()) return false;
+        auto &frames = async_return_frames[thread_table.current_uid];
+        if (!frames.empty()) return false;
+        CallbackRecord &callback = pending->second;
+        const std::uint32_t count = callback.notify_count;
+        callback.notify_count = 0u;
+        psprecomp::AllegrexContext resume = ctx;
+        resume.pc = ctx.gpr[31];
+        resume.set_gpr(2, 0u);
+        frames.push_back(AsyncReturnFrame{AsyncReturnKind::UserCallback, resume, 0u, 0, 0, 0, pending->first});
+        if (std::getenv("PSPRECOMP_THREAD_DIAG") != nullptr)
+            std::cerr << "[callback] run " << callback.name << " uid=" << pending->first
+                      << " thread=" << thread_table.current_uid << " arg=" << callback.notify_argument << "\n";
+        ctx.set_gpr(4, count);
+        ctx.set_gpr(5, callback.notify_argument);
+        ctx.set_gpr(6, callback.common);
+        ctx.set_gpr(31, 0x00000004u);
+        ctx.pc = callback.function;
+        return true;
+    };
+
     auto sleep_thread = [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
         (void)sleep_current_thread(rt, ctx);
     };
     runtime.register_hle("ThreadManForUser", 0x9ACE131Eu, sleep_thread);
-    runtime.register_hle("ThreadManForUser", 0x82826F70u, sleep_thread);
+    runtime.register_hle("ThreadManForUser", 0x82826F70u, // sceKernelSleepThreadCB
+        [deliver_callback](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            if (deliver_callback(ctx)) return;
+            if (std::getenv("PSPRECOMP_THREAD_DIAG") != nullptr)
+                std::cerr << "[thread] sleepCB uid=" << thread_table.current_uid
+                          << " ra=" << psprecomp::hex32(ctx.gpr[31]) << "\n";
+            (void)sleep_current_thread(rt, ctx);
+        });
     runtime.register_hle("ThreadManForUser", 0xD59EAD2Fu,
         [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
             const std::uint32_t result = wake_thread(static_cast<std::int32_t>(ctx.gpr[4]));
+            if (std::getenv("PSPRECOMP_THREAD_DIAG") != nullptr)
+                std::cerr << "[thread] wakeup uid=" << static_cast<std::int32_t>(ctx.gpr[4])
+                          << " by=" << thread_table.current_uid << " ra=" << psprecomp::hex32(ctx.gpr[31])
+                          << " -> " << psprecomp::hex32(result) << "\n";
             ctx.set_gpr(2, result);
             if (result == 0u) (void)preempt_if_higher_priority(ctx, "thread-wakeup");
         });
@@ -6593,7 +6843,11 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
         (void)delay_current_thread(rt, ctx, ctx.gpr[4]);
     };
     runtime.register_hle("ThreadManForUser", 0xCEADEB47u, delay_thread);
-    runtime.register_hle("ThreadManForUser", 0x68DA9E36u, delay_thread);
+    runtime.register_hle("ThreadManForUser", 0x68DA9E36u, // sceKernelDelayThreadCB
+        [deliver_callback](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            if (deliver_callback(ctx)) return;
+            (void)delay_current_thread(rt, ctx, ctx.gpr[4]);
+        });
 
     runtime.register_hle("ThreadManForUser", 0xE81CAF8Fu,
         [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
@@ -7356,6 +7610,8 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                 ctx.set_gpr(2, 0x800001FEu);
                 return;
             }
+            // Waiting for the GE means its callbacks have run by the time the call returns.
+            if (ctx.gpr[5] == 0u) for (auto &callback : deferred_ge_callbacks) callback.not_before_us = 0u;
             if (ge_async_running()) {
                 if (ctx.gpr[5] == 0u && !ge_async_wait_list(rt, id)) return;
                 std::lock_guard lock(ge_async.mutex);
@@ -7382,6 +7638,7 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                 ctx.set_gpr(2, 0x800001FEu);
                 return;
             }
+            if (ctx.gpr[4] == 0u) for (auto &callback : deferred_ge_callbacks) callback.not_before_us = 0u;
             if (ge_async_running()) {
                 if (ctx.gpr[4] == 0u) {
                     if (!ge_async_wait_idle(rt)) return;
@@ -7604,12 +7861,36 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             ctx.set_gpr(2, phase < blank ? 1u : 0u);
         });
     auto wait_vblank = [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+        const HostSlowSection slow_whole("wait_vblank");
+        // PSPRECOMP_FRAME_SUMMARY=1: one line a minute (3600 vblank waits) with the worst gaps between
+        // vblank waits, so stalls can be measured without per-frame logging disturbing them.
+        if (static const bool summary = std::getenv("PSPRECOMP_FRAME_SUMMARY") != nullptr; summary) {
+            static auto last = std::chrono::steady_clock::now();
+            static std::uint32_t count = 0u, over100 = 0u, over50 = 0u;
+            static long long worst = 0;
+            const auto now = std::chrono::steady_clock::now();
+            const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count();
+            last = now;
+            worst = std::max(worst, ms);
+            over100 += ms > 100 ? 1u : 0u;
+            over50 += ms > 50 ? 1u : 0u;
+            if (++count >= 3600u) {
+                std::fprintf(stderr, "[frame-summary] vblank=%llu worst_ms=%lld over100=%u over50=%u%c",
+                             static_cast<unsigned long long>(display_vblank_index), worst, over100, over50, 10);
+                count = over100 = over50 = 0u;
+                worst = 0;
+            }
+        }
         // The display consumes the completed GE frame.  This is a real PSP
         // visibility boundary: allow guest/GE overlap during the frame, then
         // wait only here before framebuffer presentation and vblank callbacks.
         if (!ge_async_wait_idle(rt)) return;
         ++display_vblank_index;
-        vcs::audio_output_advance(virtual_time_us);
+        last_waited_vblank_us = virtual_time_us;
+        seen_real_vblank_wait = true;
+        wait_dump_runtime = &rt;
+        idle_jumped_since_vblank_us = 0u;
+        { const HostSlowSection slow("audio_output_advance"); vcs::audio_output_advance(virtual_time_us); }
         report_realtime_speed_if_requested();
         if (frame_time_diag_enabled()) {
             const auto now = std::chrono::steady_clock::now();
@@ -7757,7 +8038,7 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             movie_output_buffers.count(normalize_ram_address(display_state.frame_buffer)) != 0u);
         const auto present_entry = frame_time_diag_enabled()
             ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-        const bool gpu_frame_ready = ge_gpu_backend_finish_color_frame(display_vblank_index);
+        bool gpu_frame_ready; { const HostSlowSection slow("finish_color_frame"); gpu_frame_ready = ge_gpu_backend_finish_color_frame(display_vblank_index); }
         // VCS only fills the displayed framebuffer on every other vblank, so the
         // GPU path produces a frame at half the vblank rate. Presenting the
         // software framebuffer in between alternated two differently scaled
@@ -7807,7 +8088,7 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
         if (gpu_frame_ready) dump_gpu_internal_frame_if_requested(display_vblank_index);
         if (frame_time_diag_enabled())
             frame_time_stats.present_time += std::chrono::steady_clock::now() - present_entry;
-        limit_frame_rate();
+        { const HostSlowSection slow("limit_frame_rate"); limit_frame_rate(); }
         if (display_window_close_requested()) {
             ctx.set_gpr(2, 0u);
             rt.stop("Display window closed by the user");
@@ -8862,12 +9143,29 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             set_success(ctx);
         });
 
-    runtime.register_hle("scePower", 0x04B7766Eu,
-        [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { set_success(ctx); });
+    // Registering power/UMD callbacks makes the PSP kernel notify the current
+    // state at once; system-manager threads wait for that first notification.
+    const auto notify_callback_now = [](std::int32_t uid, std::uint32_t argument) {
+        const auto callback = callback_table.callbacks.find(uid);
+        if (callback == callback_table.callbacks.end()) return false;
+        callback->second.notify_count += 1u;
+        callback->second.notify_argument = argument;
+        return true;
+    };
+    runtime.register_hle("scePower", 0x04B7766Eu, // scePowerRegisterCallback(slot, cbid)
+        [notify_callback_now](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            // AC power | battery present | 100 %.
+            (void)notify_callback_now(static_cast<std::int32_t>(ctx.gpr[5]), 0x1000u | 0x80u | 0x64u);
+            set_success(ctx);
+        });
     runtime.register_hle("scePower", 0xDFA8BAF8u,
         [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { set_success(ctx); });
-    runtime.register_hle("sceUmdUser", 0xAEE7404Du,
-        [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { set_success(ctx); });
+    runtime.register_hle("sceUmdUser", 0xAEE7404Du, // sceUmdRegisterUMDCallBack(cbid)
+        [notify_callback_now](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            // present | inited | ready, same as sceUmdGetDriveStat.
+            (void)notify_callback_now(static_cast<std::int32_t>(ctx.gpr[4]), 0x32u);
+            set_success(ctx);
+        });
     runtime.register_hle("sceUmdUser", 0xBD2BDE07u,
         [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { set_success(ctx); });
     runtime.register_hle("sceUmdUser", 0x46EBB729u,
@@ -9487,6 +9785,31 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             const std::uint32_t output_length = rt.memory().contains(ctx.gpr[29] + 20u, 4u)
                 ? rt.memory().load32(ctx.gpr[29] + 20u) : 0u;
 
+            // Register a memory-stick insert/eject callback (fatms0: 0x02415821,
+            // mscmhc0: 0x02015804).  The stick is always present, so the kernel
+            // notifies "inserted" (1) right away, like the PSP does on register.
+            if ((command == 0x02415821u && (device == "fatms0:" || device == "ms0:")) ||
+                (command == 0x02015804u && (device == "mscmhc0:" || device == "ms0:"))) {
+                if (input == 0u || input_length < 4u || !rt.memory().contains(input, 4u)) {
+                    ctx.set_gpr(2, 0x80010016u);
+                    return;
+                }
+                const auto uid = static_cast<std::int32_t>(rt.memory().load32(input));
+                const auto callback = callback_table.callbacks.find(uid);
+                if (callback == callback_table.callbacks.end()) {
+                    ctx.set_gpr(2, 0x80010016u);
+                    return;
+                }
+                callback->second.notify_count += 1u;
+                callback->second.notify_argument = 1u;
+                set_success(ctx);
+                return;
+            }
+            if ((command == 0x02415822u && (device == "fatms0:" || device == "ms0:")) ||
+                (command == 0x02015805u && (device == "mscmhc0:" || device == "ms0:"))) {
+                set_success(ctx);
+                return;
+            }
             if (command == 0x02425823u && (device == "fatms0:" || device == "ms0:")) {
                 if (output == 0u || !rt.memory().contains(output, 4u)) {
                     ctx.set_gpr(2, 0x80010016u);
@@ -9767,7 +10090,11 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             // game list shows the modification time, so leaving these zero put
             // every save in the year zero.
             const auto written = std::filesystem::last_write_time(native, error);
-            const auto system_time = std::chrono::file_clock::to_sys(written);
+            // Portable across MSVC and libstdc++/libc++ (MSVC's file_clock has no to_sys, older
+            // libstdc++ has no clock_cast): shift by the current offset between the two clocks.
+            const auto system_time = std::chrono::system_clock::now() +
+                std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                    written - std::filesystem::file_time_type::clock::now());
             const std::time_t seconds = std::chrono::system_clock::to_time_t(
                 std::chrono::time_point_cast<std::chrono::system_clock::duration>(system_time));
             std::tm parts{};
@@ -9885,6 +10212,8 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             }
             const auto fd = file_table.next_fd++;
             file_table.files.emplace(fd, std::move(stream));
+            if (std::getenv("PSPRECOMP_IO_DIAG") != nullptr)
+                std::cerr << "[io] sceIoOpen fd=" << fd << " psp=\"" << path << "\" flags=" << psprecomp::hex32(flags) << "\n";
             if (file_object_diag) {
                 std::cerr << "[fileobj-hle] open-ok fd=" << fd << " path=\"" << path
                           << "\" native=\"" << native.string()
@@ -10089,8 +10418,12 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                 ctx.set_gpr(2, 0u);
                 return;
             }
+            static const bool read_diag = std::getenv("PSPRECOMP_IO_DIAG") != nullptr;
             const auto it = file_table.files.find(fd);
             if (it == file_table.files.end() || !rt.memory().contains(dst, size)) {
+                if (read_diag)
+                    std::cerr << "[io] sceIoRead rejected fd=" << fd << " dst=" << psprecomp::hex32(dst)
+                              << " size=" << size << " ra=" << psprecomp::hex32(ctx.gpr[31]) << "\n";
                 ctx.set_gpr(2, 0x80010009u);
                 return;
             }
@@ -10102,9 +10435,13 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             const bool time_io = frame_time_diag_enabled();
             const auto io_entry = time_io ? std::chrono::steady_clock::now()
                                           : std::chrono::steady_clock::time_point{};
+            const auto read_position = read_diag ? static_cast<std::int64_t>(it->second.tellg()) : 0;
             it->second.read(reinterpret_cast<char *>(guest_destination),
                             static_cast<std::streamsize>(size));
             const auto read = static_cast<std::size_t>(it->second.gcount());
+            if (read_diag)
+                std::cerr << "[io] sceIoRead fd=" << fd << " dst=" << psprecomp::hex32(dst) << " pos=" << read_position
+                          << " size=" << size << " -> " << read << " uid=" << thread_table.current_uid << "\n";
             if (time_io) io_host_time_this_vblank += std::chrono::steady_clock::now() - io_entry;
             ctx.set_gpr(2, static_cast<std::uint32_t>(read));
         });

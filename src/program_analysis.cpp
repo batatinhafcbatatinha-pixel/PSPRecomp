@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <limits>
 #include <optional>
@@ -484,6 +486,19 @@ std::map<std::uint32_t, std::string> collect_initial_seeds(const Elf32Image &elf
     collect_unrelocated_jump_tables(elf, memory, load_base, ranges, seeds);
     collect_unrelocated_code_pointer_runs(elf, memory, load_base, ranges, seeds);
     collect_padded_leaf_functions(elf, memory, load_base, ranges, seeds);
+    // PSPRECOMP_EXTRA_SEEDS=<file>: one hex address per line.  Used for code
+    // overlays, whose entry points are only referenced from the main image.
+    if (const char *path = std::getenv("PSPRECOMP_EXTRA_SEEDS"); path != nullptr && *path != '\0') {
+        if (std::FILE *file = std::fopen(path, "r")) {
+            char line[64];
+            while (std::fgets(line, sizeof line, file) != nullptr) {
+                char *end = nullptr;
+                const unsigned long value = std::strtoul(line, &end, 16);
+                if (end != line) add_seed(seeds, ranges, static_cast<std::uint32_t>(value), "extra_seed");
+            }
+            std::fclose(file);
+        }
+    }
     // R_MIPS_32 relocations are the authoritative source for function pointers
     // stored in read-only tables embedded in the executable segment (init arrays,
     // vtables, callbacks). Scanning raw RX words would confuse J opcodes with pointers.
