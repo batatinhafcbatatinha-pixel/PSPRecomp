@@ -32,7 +32,8 @@ translates them ahead of time with `psp_recomp --overlay` (`profiles/ctw/tools/m
 `build/overlays`, `regen_overlays.py` translates them into `build/ovlgen`, `build-native.cmd` compiles them in). Known
 gaps: the PSP stencil buffer is not emulated (street-lamp light pools
 can look wrong), bloom is skipped on DirectX 12, a one-off pause of about two seconds after the logos, short hitches
-while a new part of the city streams in, and no in-game settings menu.
+while a new part of the city streams in (the game inflates map sections on its main thread; a native inflate
+written from RFC 1951 is still to be done, see `docs/SOURCE_PROVENANCE.md`), and no in-game settings menu.
 
 ## Differences from upstream
 
@@ -45,7 +46,7 @@ while a new part of the city streams in, and no in-game settings menu.
 - static recompilation of code overlays: `psp_recomp <ELF> --overlay <dir> <tag>`, `Runtime::register_overlay` with
   fingerprint routing of the overlay windows, extra analysis seeds (`PSPRECOMP_EXTRA_SEEDS`)
 - CTW on DirectX 12: general PSP blend modes, hardware back-face culling, timing at the stock 30 fps, kernel callback
-  and VBLANK interrupt delivery, native `inflate_fast`, headless input and frame capture for unattended tests
+  and VBLANK interrupt delivery, headless input and frame capture for unattended tests
 
 ## Building
 

@@ -161,8 +161,6 @@ void validate_vcs_game_root(const std::filesystem::path &root) {
 
 } // namespace
 
-namespace vcs { void install_ctw_native_inflate(); }
-
 int main(int argc, char **argv) {
 #ifdef _WIN32
     SetUnhandledExceptionFilter(&vcs_unhandled_exception_filter);
@@ -313,7 +311,6 @@ int main(int argc, char **argv) {
         vcs::display_window_start();
         vcs::install_display_heartbeat();
         vcs::install_starvation_preemption();
-        vcs::install_ctw_native_inflate();
         // PSPRECOMP_PC_SAMPLE=<ms>: host watchdog printing the guest dispatch PC, thread and ctx pc/ra (racy, diag only).
         if (const char *sample = std::getenv("PSPRECOMP_PC_SAMPLE"); sample != nullptr) {
             const int ms = std::max(1, std::atoi(sample));
