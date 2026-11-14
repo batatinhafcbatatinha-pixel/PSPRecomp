@@ -23,3 +23,19 @@ Third-party source, binary dependencies, shader code and notices stay beside the
 ## Contribution rule
 
 Do not paste or adapt source from a project whose license is incompatible with the destination file. Reimplement required behavior from specifications, observations or independently documented semantics, and record the source of third-party material when it is intentionally included under a compatible license.
+
+## Generated and game-derived code
+
+Output of the recompiler for a game's code (`profiles/*/generated/`, `build/gen`, overlay translations), dumps,
+captures, game data and disassembly never enter the repository; they are produced on the user's machine from the
+user's own files and are git-ignored. The checked-in `profiles/vcs/generated/` inherited from upstream was removed
+for this reason. Host code must be written from observed behaviour and public documents, not by transcribing game
+routines (a CTW inflate file that said so was removed; a replacement is to be written from RFC 1951 or zlib and
+recorded in `THIRD_PARTY_NOTICES.md`).
+
+## WidescreenFixesPack (ThirteenAG)
+
+Code and data derived from WidescreenFixesPack were taken on 2026-08-12 (`37e5469`) when that project was MIT
+licensed; see `THIRD_PARTY_NOTICES.md`. The project changed to GPL-3.0 on 2026-11-08. **Nothing newer than what is
+already in the tree may be taken from it into this MIT repository**, and no new code may be derived from its current
+sources. Behaviour may still be reimplemented from observation of the game and from public documentation.
