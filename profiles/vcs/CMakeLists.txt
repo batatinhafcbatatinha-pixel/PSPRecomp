@@ -33,6 +33,10 @@ if(NOT PSPRECOMP_HOT_GENERATED_INLINE_LEVEL MATCHES "^[0-3]$")
     message(FATAL_ERROR "PSPRECOMP_HOT_GENERATED_INLINE_LEVEL must be 0, 1, 2 or 3")
 endif()
 
+if(NOT EXISTS "${VCS_PROFILE_DIR}/generated/generated_registry.cpp")
+    message(FATAL_ERROR "No generated VCS code in ${VCS_PROFILE_DIR}/generated. It is not distributed: "
+        "generate it from your own executable with vcs_recomp --auto (see profiles/vcs/README.md).")
+endif()
 file(GLOB VCS_GENERATED CONFIGURE_DEPENDS "${VCS_PROFILE_DIR}/generated/*.cpp")
 if(MSVC)
     if(PSPRECOMP_GENERATED_OPT_LEVEL STREQUAL "0")

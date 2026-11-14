@@ -10,7 +10,7 @@ profiles/<id>/
   README.md
   config/          Profile configuration and analysis inputs
   data/            Redistributable profile data generated from compatible sources
-  generated/       Checked-in AOT C++ corpus for the supported executable
+  generated/       AOT C++ generated locally from the user's own executable (git-ignored, never committed)
   host/            HLE, bootstrap, renderer/audio/input integration and patches
   scripts/         Current build, run and benchmark entry points
   tests/           Profile-specific regression tests
@@ -54,7 +54,7 @@ cmake --build out/framework
 
 ## 6. Keep generated code reproducible
 
-If generated AOT files are checked in, document:
+Generated AOT files are translated game code: they are never checked in (`.gitignore` covers `profiles/*/generated/`). Produce them on the user's machine and document:
 
 - executable identity/hash expected by the profile;
 - stable function-map/config inputs;

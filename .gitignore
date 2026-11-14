@@ -60,3 +60,7 @@ __pycache__/
 /profiles/*/.game-install.lock
 /profiles/*/third_party/ffmpeg/lib/
 /profiles/*/third_party/ffmpeg/bin/
+
+# Recompiler output of a game's code is generated on the user's machine from the user's own executable
+/profiles/*/generated/
+/profiles/*/build/gen/

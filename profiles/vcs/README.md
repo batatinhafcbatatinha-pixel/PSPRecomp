@@ -14,12 +14,29 @@ For the single-configuration Ninja workflow used during incremental renderer and
 generated-code development, see [`../../docs/VCS_NINJA_BUILD.md`](../../docs/VCS_NINJA_BUILD.md).
 
 
+## Generated code is not in the repository
+
+`profiles/vcs/generated/` used to be checked in (it came with the upstream project). It is translated game code, so
+it was removed and is ignored by Git (see `docs/SOURCE_PROVENANCE.md`). It must be produced on your PC from your own
+decrypted executable (SHA-256 in `config/vcs_ulus10160.toml`):
+
+```bat
+vcs_recomp <your decrypted EBOOT.BIN> --auto profiles/vcs/generated 0x08804000 16384
+```
+
+(`vcs_recomp` is built by this profile's CMake from `tools/vcs_codegen_main.cpp`; the arguments are the load base and
+unit span recorded in the old `auto_codegen_report.json`; the optional `tools/optimize_generated_*.py` passes ran after
+it.) **Known gap:** the removed copy had hand-edited call sites in four units (host hooks for widescreen, camera, vehicle
+input and entity LOD). The generator does not emit them, so a freshly generated corpus runs without those features
+until they are re-expressed as a post-generation patch step written from the host functions in `host/`. The VCS
+profile is therefore not a one-click build yet; the CTW profile (`profiles/ctw`) is, via the launcher.
+
 ## Source layout
 
 ```text
 config/       VCS profile configuration and executable metadata
 data/         Redistributable generated profile data
-generated/    AOT C++ generated from the supported executable
+generated/    AOT C++ generated locally from your own executable (git-ignored, not in the repository)
 host/         VCS HLE, bootstrap, renderer, audio, input and native fast paths
 scripts/      Maintained Windows build/run/benchmark scripts
 tests/        Profile regression tests
