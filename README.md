@@ -1,5 +1,7 @@
 # PSPRecomp (fork with game ports)
 
+**Download:** [PSPRecomp-windows.zip](https://github.com/batatinhafcbatatinha-pixel/PSPRecomp/releases/latest/download/PSPRecomp-windows.zip) (source + `Launcher.exe`: unzip, open `Launcher.exe`; Windows only, PSPRecomp has no Linux or macOS build).
+
 Fork of [jessicanataliagta/PSPRecomp](https://github.com/jessicanataliagta/PSPRecomp) with game profiles in
 [`profiles/`](profiles/) and a launcher that builds and starts them from **your own disc**. No game content (disc image,
 executable, data or generated code) is in this repository.
