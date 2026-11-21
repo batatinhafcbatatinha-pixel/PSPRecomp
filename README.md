@@ -27,7 +27,13 @@ Windows 10/11 x64. About 15 GB free and 30-90 minutes for the first build.
 | --- | --- | --- |
 | Grand Theft Auto: Chinatown Wars ([`profiles/ctw`](profiles/ctw/)) | PSP, USA (ULUS-10490) | reaches gameplay (intro, first mission, driving) in the development build; the launcher now runs the same steps, but a full launcher install has not been tested yet |
 
-Only this exact disc is supported (checked by SHA-256, see `profiles/ctw/installer.json`).
+This exact disc has a profile (checked by SHA-256, see `profiles/ctw/installer.json`).
+
+**Any other PSP disc** goes through the generic path ([`profiles/generic`](profiles/generic/README.md),
+[`tools/pspport`](tools/pspport/pspport.py)): the launcher shows it as **BUILD (GENERIC)**, decrypts your EBOOT on your
+PC, translates it and compiles it with the PSP host the ctw profile uses, with no game-specific code. Games without a
+profile may not work or may stop somewhere; games that load code overlays from their own files (as Chinatown Wars does)
+need more than the generic path does yet. Tested so far: GTA: Liberty City Stories (ULUS-10041) translates and compiles.
 
 Chinatown Wars keeps most of its game code in overlays (`OVERLAYS.PAK`) that it loads on demand. The launcher
 translates them ahead of time with `psp_recomp --overlay` (`profiles/ctw/tools/make_ctw_overlays.py` writes them to

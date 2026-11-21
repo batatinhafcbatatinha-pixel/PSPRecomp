@@ -134,6 +134,12 @@ std::filesystem::path native_executable_directory(const char *argv0) {
 
 void validate_vcs_game_root(const std::filesystem::path &root) {
     if (std::getenv("PSPRECOMP_ALLOW_INCOMPLETE_ROOT") != nullptr) return;
+#if defined(PSPRECOMP_GENERIC_HOST)
+    /* The generic profile (any PSP game): the launcher copied and checked the
+     * whole disc, and these are Chinatown Wars' files. */
+    (void)root;
+    return;
+#endif
 
     constexpr std::array<const char *, 2> required_boot_files{
         "PSP_GAME/USRDIR/100MEG_A.BIN",

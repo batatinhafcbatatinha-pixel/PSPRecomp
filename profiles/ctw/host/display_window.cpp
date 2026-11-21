@@ -1,4 +1,9 @@
 #include "display_window.hpp"
+
+// The window title (the generic profile sets the name of the game it was built from).
+#ifndef PSPRECOMP_HOST_TITLE
+#define PSPRECOMP_HOST_TITLE L"CTWNative — GTA: Vice City Stories"
+#endif
 #include "dx12_presenter.hpp"
 #include "ge_gpu_backend.hpp"
 #include "vcs_config.hpp"
@@ -319,7 +324,7 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM wparam, LPAR
         return 1;
     case WM_TIMER: {
         if (wparam != kStatusTimer) break;
-        std::wstring title = L"CTWNative — GTA: Vice City Stories — ";
+        std::wstring title = PSPRECOMP_HOST_TITLE L" — ";
         {
             std::lock_guard<std::mutex> guard(state.mutex);
             title.append(state.status.begin(), state.status.end());
@@ -465,7 +470,7 @@ void window_thread_main() {
         window_y = static_cast<int>(work.top);
     }
     const HWND window = CreateWindowExW(
-        0, window_class.lpszClassName, L"CTWNative — GTA: Vice City Stories",
+        0, window_class.lpszClassName, PSPRECOMP_HOST_TITLE,
         style, window_x, window_y,
         bounds.right - bounds.left, bounds.bottom - bounds.top,
         nullptr, nullptr, instance, nullptr);
@@ -949,7 +954,7 @@ void display_window_shutdown() {
         PostMessageW(window, WM_CLOSE, 0, 0);
         return;
     }
-    SetWindowTextW(window, L"CTWNative — stopped (close this window)");
+    SetWindowTextW(window, PSPRECOMP_HOST_TITLE L" — stopped (close this window)");
     while (!state.close_requested.load(std::memory_order_relaxed) &&
            state.window.load(std::memory_order_acquire) != nullptr) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));

@@ -1,5 +1,10 @@
 #include "vcs_config.hpp"
 
+// The settings file beside the executable (the generic profile builds PSPNative.exe with PSPNative.ini).
+#ifndef PSPRECOMP_HOST_INI
+#define PSPRECOMP_HOST_INI "CTWNative.ini"
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -741,7 +746,7 @@ void initialize_vcs_configuration(const std::filesystem::path &executable_direct
         override_path != nullptr && *override_path != '\0') {
         path = override_path;
     } else {
-        path = executable_directory / "CTWNative.ini";
+        path = executable_directory / PSPRECOMP_HOST_INI;
     }
 
     VcsConfiguration loaded = load_vcs_configuration(path);

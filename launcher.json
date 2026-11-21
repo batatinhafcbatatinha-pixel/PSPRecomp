@@ -33,5 +33,48 @@
       }
     ]
   },
-  "groups": []
+  "groups": [],
+  "generic": {
+    "play": "Play.cmd",
+    "play_cmd": "@echo off\r\nrem Starts this game (built by the launcher with tools/pspport).\r\npython \"%~dp0..\\..\\..\\tools\\pspport\\pspport.py\" play --port \"%~dp0.\"\r\nexit /b %errorlevel%\r\n",
+    "exe": "build/native/bin/PSPNative.exe",
+    "disk_gb": 10,
+    "download_gb": 1.2,
+    "minutes": "60-180",
+    "tools": [
+      "llvm-mingw",
+      "cmake",
+      "ninja"
+    ],
+    "gb_per_job": 3,
+    "steps": [
+      {
+        "name": "Decrypt and translate your game (PSPRecomp)",
+        "run": [
+          "{python}",
+          "../../../tools/pspport/pspport.py",
+          "prepare",
+          "--port",
+          "{root}"
+        ],
+        "done_if": "build/gen/generated_registry.cpp",
+        "prepare": true
+      },
+      {
+        "name": "Compile",
+        "run": [
+          "{python}",
+          "../../../tools/pspport/pspport.py",
+          "compile",
+          "--port",
+          "{root}",
+          "--jobs",
+          "{jobs}"
+        ],
+        "retry_if": "build/native/build.ninja"
+      }
+    ],
+    "buildtools": false
+  },
+  "generic_label": "^[A-Z]{4}-\\d{5}$"
 }
