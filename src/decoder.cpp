@@ -304,6 +304,12 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
         if (group == 3u) {
             d.kind = OpcodeKind::Vcst;
             d.mnemonic = "vcst";
+        } else if (group == 1u && operation <= 3u) {
+            // The VFPU random generator: vrnds seeds it, vrndi fills lanes
+            // with 32-bit integers, vrndf1/vrndf2 with floats in [1,2)/[2,4).
+            d.kind = OpcodeKind::Vrnd;
+            static constexpr const char *names[4]{"vrnds", "vrndi", "vrndf1", "vrndf2"};
+            d.mnemonic = names[operation];
         } else if (group == 1u && operation == 18u) {
             d.kind = OpcodeKind::Vf2h;
             d.mnemonic = "vf2h";

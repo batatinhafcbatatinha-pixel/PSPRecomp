@@ -5923,6 +5923,41 @@ void install_ctw_missing_hle(psprecomp::Runtime &runtime) {
             io_async_results[static_cast<std::int32_t>(ctx.gpr[4])] = call.gpr[2];
             set_success(ctx);
         });
+    // Read/write/seek run at once, like open and close above; the result waits in io_async_results for the
+    // poll or wait that collects it (a 32-bit result sign-extended, the seek's 64-bit position whole).
+    const auto async_io = [](std::uint32_t sync_nid, bool wide) {
+        return [sync_nid, wide](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const auto fd = static_cast<std::int32_t>(ctx.gpr[4]);
+            if (io_async_results.contains(fd)) { ctx.set_gpr(2, 0x80020329u); return; }   // one operation at a time
+            psprecomp::AllegrexContext call = ctx;
+            rt.invoke_import("IoFileMgrForUser", sync_nid, call);
+            io_async_results[fd] = wide
+                ? (static_cast<std::uint64_t>(call.gpr[3]) << 32u) | call.gpr[2]
+                : static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(call.gpr[2])));
+            set_success(ctx);
+        };
+    };
+    runtime.register_hle("IoFileMgrForUser", 0xA0B5A7C2u, async_io(0x6A638D83u, false)); // sceIoReadAsync
+    runtime.register_hle("IoFileMgrForUser", 0x0FACAB19u, async_io(0x42EC03ACu, false)); // sceIoWriteAsync
+    runtime.register_hle("IoFileMgrForUser", 0x71B19E77u, async_io(0x27EB27B8u, true));  // sceIoLseekAsync
+    // The operation is already done: waiting, polling and asking for its state all collect the result.
+    const auto collect_async = [](std::uint32_t result_register) {
+        return [result_register](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const auto fd = static_cast<std::int32_t>(ctx.gpr[4]);
+            const auto it = io_async_results.find(fd);
+            if (it == io_async_results.end()) { ctx.set_gpr(2, 0x80020329u); return; }
+            const std::uint32_t out = ctx.gpr[result_register];
+            if (out != 0u && rt.memory().contains(out, 8u)) {
+                rt.memory().store32(out, static_cast<std::uint32_t>(it->second));
+                rt.memory().store32(out + 4u, static_cast<std::uint32_t>(it->second >> 32u));
+            }
+            io_async_results.erase(it);
+            set_success(ctx);
+        };
+    };
+    runtime.register_hle("IoFileMgrForUser", 0xE23EEC33u, collect_async(5u)); // sceIoWaitAsync(fd, res)
+    runtime.register_hle("IoFileMgrForUser", 0x35DBD746u, collect_async(5u)); // sceIoWaitAsyncCB(fd, res)
+    runtime.register_hle("IoFileMgrForUser", 0xCB05F8D6u, collect_async(6u)); // sceIoGetAsyncStat(fd, poll, res)
     runtime.register_hle("IoFileMgrForUser", 0x3251EA56u, // sceIoPollAsync
         [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
             const auto fd = static_cast<std::int32_t>(ctx.gpr[4]);
@@ -5994,6 +6029,11 @@ void install_ctw_missing_hle(psprecomp::Runtime &runtime) {
     runtime.register_hle("sceUmdUser", 0x20628E6Fu, // sceUmdGetErrorStat
         [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { set_success(ctx); });
     runtime.register_hle("sceUmdUser", 0x56202973u, // sceUmdWaitDriveStatWithTimer
+        [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { set_success(ctx); });
+    // The game files are always there: every wait for a drive state is satisfied at once.
+    runtime.register_hle("sceUmdUser", 0x4A9E5E29u, // sceUmdWaitDriveStatCB
+        [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { set_success(ctx); });
+    runtime.register_hle("sceUmdUser", 0x6AF9B50Au, // sceUmdCancelWaitDriveStat
         [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { set_success(ctx); });
 
     // ---- sceUtility ----
@@ -8523,6 +8563,16 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             ctx.set_gpr(2, static_cast<std::uint32_t>(id));
         });
 
+    // sceAtracSetDataAndGetID(buffer, size): the whole file already in the buffer, the halfway-buffer case with
+    // everything read.
+    runtime.register_hle("sceAtrac3plus", 0x7A20E7AFu,
+        [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            psprecomp::AllegrexContext call = ctx;
+            call.gpr[6] = ctx.gpr[5];
+            rt.invoke_import("sceAtrac3plus", 0x0FAE370Eu, call);
+            ctx.set_gpr(2, call.gpr[2]);
+        });
+
     runtime.register_hle("sceAtrac3plus", 0x61EB33F5u,
         [get_atrac](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
             auto *state = get_atrac(ctx.gpr[4]);
@@ -9179,6 +9229,10 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
     runtime.register_hle("LoadExecForUser", 0x4AC57943u,
         [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { set_success(ctx); });
     runtime.register_hle("sceMpeg", 0x682A619Bu,
+        [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { set_success(ctx); });
+    // sceMpegAvcDecodeMode(mpeg, mode): the pixel format the decoder writes; the host's decoder converts to the
+    // format the frame copy asks for, so the mode is accepted as given.
+    runtime.register_hle("sceMpeg", 0xA11C7026u,
         [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { set_success(ctx); });
     runtime.register_hle("sceMpeg", 0x874624D6u,
         [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { set_success(ctx); });

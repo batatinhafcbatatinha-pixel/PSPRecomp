@@ -475,7 +475,16 @@ std::map<std::uint32_t, std::string> collect_initial_seeds(const Elf32Image &elf
 
     for (const auto &range : ranges) {
         for (std::uint32_t pc = range.start; pc + 4u <= range.end; pc += 4u) {
-            const auto decoded = decode_allegrex(memory.load32(pc));
+            const std::uint32_t word = memory.load32(pc);
+            // A function reached only through a pointer the scans below cannot
+            // see (built at run time, in a table without relocations) still
+            // starts like the others: right after the previous one's `jr ra`
+            // and its delay slot, with `addiu sp,sp,-N` opening its frame.
+            if (pc >= range.start + 8u && memory.load32(pc - 8u) == 0x03E00008u &&
+                (word >> 16u) == 0x27BDu && (word & 0x8000u) != 0u) {
+                add_seed(seeds, ranges, pc, "frame_after_return");
+            }
+            const auto decoded = decode_allegrex(word);
             if (decoded.kind != OpcodeKind::Jal) continue;
             add_seed(seeds, ranges, direct_jump_target(pc, decoded), "direct_jal_target");
         }

@@ -527,6 +527,37 @@ std::string emit_regular(const psprecomp::DecodedInstruction &d, std::uint32_t p
             << "      ctx.write_vfpu_vector_with_destination_prefix(vfpu_result, " << destination << "u, vfpu_side); }\n";
         break;
     }
+    case psprecomp::OpcodeKind::Vrnd: {
+        // State in RCX0 (VFPU control register 8), a 32-bit xorshift: a
+        // title only relies on the sequence being random-looking and
+        // reproducible from its seed.
+        const std::uint32_t operation = (d.word >> 16u) & 3u;
+        const std::uint32_t size_code = ((d.word >> 7u) & 1u) | (((d.word >> 15u) & 1u) << 1u);
+        const std::uint32_t length = size_code + 1u;
+        if (operation == 0u) {
+            const std::uint32_t source = (d.word >> 8u) & 0x7Fu;
+            out << "    { float vfpu_seed[4]{}; std::uint32_t vfpu_bits = 0u;\n"
+                << "      ctx.read_vfpu_vector(vfpu_seed, " << source << "u, 1u);\n"
+                << "      vfpu_bits = std::bit_cast<std::uint32_t>(vfpu_seed[0]);\n"
+                << "      ctx.vfpu_ctrl[8] = vfpu_bits != 0u ? vfpu_bits : 0x6D2B79F5u;\n"
+                << "      ctx.eat_vfpu_prefixes(); }\n";
+        } else {
+            const std::uint32_t destination = d.word & 0x7Fu;
+            const char *shape = operation == 1u ? "vfpu_next" : operation == 2u
+                ? "0x3F800000u | (vfpu_next >> 9u)" : "0x40000000u | (vfpu_next >> 9u)";
+            out << "    { float vfpu_value[4]{};\n"
+                << "      for (std::uint32_t lane = 0; lane < " << length << "u; ++lane) {\n"
+                << "        std::uint32_t vfpu_next = ctx.vfpu_ctrl[8] != 0u ? ctx.vfpu_ctrl[8] : 0x6D2B79F5u;\n"
+                << "        vfpu_next ^= vfpu_next << 13u; vfpu_next ^= vfpu_next >> 17u; vfpu_next ^= vfpu_next << 5u;\n"
+                << "        ctx.vfpu_ctrl[8] = vfpu_next;\n"
+                << "        const std::uint32_t vfpu_bits = " << shape << ";\n"
+                << "        vfpu_value[lane] = std::bit_cast<float>(vfpu_bits);\n"
+                << "      }\n"
+                << "      ctx.write_vfpu_vector_with_destination_prefix(vfpu_value, " << destination
+                << "u, " << length << "u); }\n";
+        }
+        break;
+    }
     case psprecomp::OpcodeKind::VfpuVectorInit: {
         const std::uint32_t size_code = ((d.word >> 7u) & 1u) | (((d.word >> 15u) & 1u) << 1u);
         const std::uint32_t length = size_code + 1u;
@@ -884,20 +915,23 @@ void emit_target(std::ostringstream &body, std::uint32_t target,
                  std::uint32_t unit_span_bytes = 0u,
                  const std::map<std::uint32_t, std::uint16_t> *direct_entry_ids = nullptr,
                  const std::set<std::uint32_t> *import_stubs = nullptr) {
+    // A fixed J/JAL to a PSP import must return to the outer dispatcher.
+    // Trying the generated-unit chain first is guaranteed to fail because import
+    // registration deliberately poisons/replaces that exact PC, and these stubs
+    // are frequently hot in real titles. Emit the minimal correct handoff directly.
+    // Checked before the local labels: when the stub table lies in the same unit
+    // as its caller (.sceStub.text right after .text), the stub's own
+    // `jr ra; nop` is a label too, and a local goto would skip the import.
+    if (import_stubs != nullptr && import_stubs->contains(target)) {
+        body << indent << "ctx.pc = " << psprecomp::hex32(target) << "u; return;\n";
+        return;
+    }
+
     if (labels.contains(target)) {
         if (target <= g_emit_branch_pc) {
             body << indent << "if (!rt.loop_backedge(ctx, " << psprecomp::hex32(target) << "u)) return;\n";
         }
         body << indent << "goto L_" << psprecomp::hex32(target).substr(2) << ";\n";
-        return;
-    }
-
-    // A fixed J/JAL to a PSP import must return to the outer dispatcher.
-    // Trying the generated-unit chain first is guaranteed to fail because import
-    // registration deliberately poisons/replaces that exact PC, and these stubs
-    // are frequently hot in real titles. Emit the minimal correct handoff directly.
-    if (import_stubs != nullptr && import_stubs->contains(target)) {
-        body << indent << "ctx.pc = " << psprecomp::hex32(target) << "u; return;\n";
         return;
     }
 
@@ -1076,7 +1110,8 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
                     body << emit_regular(slot, pc + 4u);
                     if (decoded.kind == psprecomp::OpcodeKind::J) {
                         emit_target(body, target, function.entry_labels, "    ", function.executable_base, function.unit_span_bytes, function.direct_entry_ids, function.import_stubs);
-                    } else if (function.entry_labels.contains(target)) {
+                    } else if (function.entry_labels.contains(target) &&
+                               !(function.import_stubs != nullptr && function.import_stubs->contains(target))) {
                         // Fixed same-unit JAL: the destination is already a C++
                         // label. Going through ctx.pc + LOCAL_DISPATCH needlessly
                         // re-decodes a dense entry id and burns the local-transfer
