@@ -641,7 +641,7 @@ void Runtime::run(std::uint32_t entry, std::uint64_t max_dispatches) {
             const std::int32_t dispatch_thread_uid = g_runtime_thread_uid;
             RecompiledFunction function = lookup_function(before);
             if (function == nullptr) {
-                stop("No recompiled function registered at " + hex32(before) + " ra=" + hex32(cpu_.gpr[31]) + " sp=" + hex32(cpu_.gpr[29]) + " prev=" + hex32(g_runtime_dispatch_pc));
+                (void)interpret_missing(cpu_);
                 return;
             }
             g_runtime_dispatch_pc = before;
@@ -718,8 +718,8 @@ void Runtime::run(std::uint32_t entry, std::uint64_t max_dispatches) {
             RecompiledFunction function = lookup_generated_unit(before);
             if (function == nullptr) function = lookup_function(before);
             if (function == nullptr) {
-                stop("No recompiled function registered at " + hex32(before) + " ra=" + hex32(cpu_.gpr[31]) + " sp=" + hex32(cpu_.gpr[29]) + " prev=" + hex32(g_runtime_dispatch_pc));
-                break;
+                if (!interpret_missing(cpu_)) break;
+                continue;
             }
             g_runtime_dispatch_pc = before;
             count_pc(before);
@@ -777,8 +777,8 @@ void Runtime::run(std::uint32_t entry, std::uint64_t max_dispatches) {
         RecompiledFunction function = lookup_function(before);
         const FunctionEntry *function_entry = lookup_entry(before);
         if (function == nullptr) {
-            stop("No recompiled function registered at " + hex32(before) + " ra=" + hex32(cpu_.gpr[31]) + " sp=" + hex32(cpu_.gpr[29]) + " prev=" + hex32(g_runtime_dispatch_pc));
-            break;
+            if (!interpret_missing(cpu_)) break;
+            continue;
         }
         g_runtime_dispatch_pc = before;
         count_pc(before);
@@ -1180,6 +1180,14 @@ bool Runtime::stopped() const noexcept { return stopped_; }
 const std::string &Runtime::stop_reason() const noexcept { return stop_reason_; }
 
 void Runtime::unsupported(std::uint32_t pc, std::uint32_t instruction, const std::string &reason) {
+    // A generated unit entered at an address that is none of its entries: code the translation does not hold.
+    // The interpreter runs it and leaves cpu_.pc at the next translated address; the unit then returns to the
+    // dispatcher, which continues there.
+    if (instruction == 0u && reason == "invalid internal function entry" && !stopped_) {
+        cpu_.pc = pc;
+        if (interpret_missing(cpu_)) return;
+        return;
+    }
     stop("Unsupported Allegrex instruction " + hex32(instruction) + " at " + hex32(pc) + ": " + reason);
 }
 

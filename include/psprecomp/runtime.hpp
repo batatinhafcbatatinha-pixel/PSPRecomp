@@ -11,9 +11,12 @@
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace psprecomp {
+
+struct DecodedInstruction;
 
 // generated direct-unit chaining stays on a zero-observer fast path.
 // Diagnostics flip this once for the process and transparently fall back to the
@@ -109,6 +112,9 @@ public:
 
     void unsupported(std::uint32_t pc, std::uint32_t instruction, const std::string &reason);
     void arithmetic_overflow(std::uint32_t pc, std::uint32_t instruction);
+    // Runs untranslated guest code from ctx.pc until an address with translated code (src/interpreter.cpp).
+    // False when it met an instruction it cannot run (the runtime is stopped then).
+    bool interpret_missing(AllegrexContext &ctx);
     void invoke_import(std::string_view library, std::uint32_t nid, AllegrexContext &ctx);
     // Generated import wrappers have a stable numeric slot. Resolve the
     // library/NID hash maps only on the first call, then invoke the bound HLE
@@ -327,6 +333,8 @@ private:
     GuestMemory memory_;
     NidRegistry nids_;
     AllegrexContext cpu_;
+    std::unordered_set<std::uint32_t> interpreted_entries_;
+    bool interpret_one(AllegrexContext &ctx, std::uint32_t pc, const DecodedInstruction &d);
     std::unordered_map<std::uint32_t, FunctionEntry> functions_;
     // Direct PC table, covering only the registered code window rather than all
     // of guest RAM.  direct_base_ is its 1 MiB-aligned first canonical address.

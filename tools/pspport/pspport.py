@@ -167,9 +167,16 @@ def step_decrypt(port, args):
 
 def step_translate(port, args):
     done = port.gen / 'generated_registry.cpp'
-    if done.is_file() and not args.force:
+    # Code a run had to interpret (build/learned.txt, written by the runtime's fallback interpreter) is translated
+    # too, as extra seeds: a translation older than that list is done again.
+    learned = port.build / 'learned.txt'
+    relearn = learned.is_file() and done.is_file() and learned.stat().st_mtime > done.stat().st_mtime
+    if done.is_file() and not args.force and not relearn:
         log('- translated code: already done')
         return
+    if learned.is_file():
+        os.environ['PSPRECOMP_EXTRA_SEEDS'] = str(learned)
+        log(f'- {sum(1 for _ in learned.open())} addresses a run interpreted: translated this time')
     recomp = FW / ('psp_recomp.exe' if os.name == 'nt' else 'psp_recomp')
     # Written into a temporary folder and renamed at the end, so a stopped translation is redone from scratch
     # instead of leaving half the units behind.
@@ -205,7 +212,9 @@ def step_compile(port, args):
 def step_play(port, args):
     if not port.exe.is_file():
         raise SystemExit('The game is not built yet: install it from the launcher.')
-    r = subprocess.run([str(port.exe), str(port.eboot), str(port.files)], cwd=port.exe.parent)
+    # Untranslated code runs interpreted; the addresses go to build/learned.txt for the next translation.
+    env = {**os.environ, 'PSPRECOMP_LEARN_FILE': str(port.build / 'learned.txt')}
+    r = subprocess.run([str(port.exe), str(port.eboot), str(port.files)], cwd=port.exe.parent, env=env)
     sys.exit(r.returncode)
 
 
