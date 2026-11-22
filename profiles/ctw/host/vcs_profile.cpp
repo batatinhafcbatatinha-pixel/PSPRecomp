@@ -5859,6 +5859,65 @@ void install_ctw_missing_hle(psprecomp::Runtime &runtime) {
             (void)preempt_if_higher_priority(ctx, "mutex-unlock");
         });
 
+    // ---- lightweight mutexes ----
+    // The game hands each one a 32-byte work area (count, owner, attributes, waiters, uid). Behind it is a kernel
+    // mutex of the table above: its uid is kept in the work area, and the count and owner are mirrored there after
+    // every call, for code that reads them. The lock calls take the work area where the kernel ones take the uid.
+    const auto lw_uid = [](psprecomp::Runtime &rt, std::uint32_t work) -> std::int32_t {
+        return rt.memory().contains(work, 32u) ? static_cast<std::int32_t>(rt.memory().load32(work + 16u)) : -1;
+    };
+    const auto lw_mirror = [](psprecomp::Runtime &rt, std::uint32_t work, std::int32_t uid) {
+        const auto it = mutex_table.mutexes.find(uid);
+        if (it == mutex_table.mutexes.end() || !rt.memory().contains(work, 32u)) return;
+        rt.memory().store32(work, static_cast<std::uint32_t>(it->second.count));
+        rt.memory().store32(work + 4u, it->second.count > 0 ? static_cast<std::uint32_t>(it->second.owner) : 0u);
+    };
+    runtime.register_hle("ThreadManForUser", 0x19CFF145u, // sceKernelCreateLwMutex(work, name, attr, count, opt)
+        [lw_mirror](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const std::uint32_t work = ctx.gpr[4];
+            if (!rt.memory().contains(work, 32u)) { ctx.set_gpr(2, 0x800200D3u); return; }   // illegal address
+            psprecomp::AllegrexContext call = ctx;
+            call.gpr[4] = ctx.gpr[5];
+            call.gpr[5] = ctx.gpr[6];
+            call.gpr[6] = ctx.gpr[7];
+            call.gpr[7] = 0u;
+            rt.invoke_import("ThreadManForUser", 0xB7D098C6u, call);   // sceKernelCreateMutex
+            const std::uint32_t uid = call.gpr[2];
+            if ((uid & 0x80000000u) != 0u) { ctx.set_gpr(2, uid); return; }
+            rt.memory().store32(work + 8u, ctx.gpr[6]);
+            rt.memory().store32(work + 12u, 0u);
+            rt.memory().store32(work + 16u, uid);
+            lw_mirror(rt, work, static_cast<std::int32_t>(uid));
+            set_success(ctx);
+        });
+    runtime.register_hle("ThreadManForUser", 0x60107536u, // sceKernelDeleteLwMutex(work)
+        [lw_uid](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const std::uint32_t work = ctx.gpr[4];
+            ctx.gpr[4] = static_cast<std::uint32_t>(lw_uid(rt, work));
+            rt.invoke_import("ThreadManForUser", 0xF8170FBEu, ctx);   // sceKernelDeleteMutex
+            if (ctx.gpr[2] == 0u && rt.memory().contains(work, 32u)) rt.memory().store32(work + 16u, 0xFFFFFFFFu);
+        });
+    const auto lw_lock = [mutex_lock, lw_uid, lw_mirror](bool may_wait) {
+        return [mutex_lock, lw_uid, lw_mirror, may_wait](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const std::uint32_t work = ctx.gpr[4];
+            const std::int32_t uid = lw_uid(rt, work);
+            ctx.gpr[4] = static_cast<std::uint32_t>(uid);   // a0 is the caller's to lose: it is an argument register
+            mutex_lock(rt, ctx, may_wait);
+            lw_mirror(rt, work, uid);
+        };
+    };
+    runtime.register_hle("Kernel_Library", 0xBEA46419u, lw_lock(true));   // sceKernelLockLwMutex(work, count, timeout)
+    runtime.register_hle("Kernel_Library", 0x1FC64E09u, lw_lock(true));   // sceKernelLockLwMutexCB
+    runtime.register_hle("Kernel_Library", 0xDC692EE3u, lw_lock(false));  // sceKernelTryLockLwMutex(work, count)
+    runtime.register_hle("Kernel_Library", 0x15B6446Bu, // sceKernelUnlockLwMutex(work, count)
+        [lw_uid, lw_mirror](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const std::uint32_t work = ctx.gpr[4];
+            const std::int32_t uid = lw_uid(rt, work);
+            ctx.gpr[4] = static_cast<std::uint32_t>(uid);
+            rt.invoke_import("ThreadManForUser", 0x6B30100Fu, ctx);   // sceKernelUnlockMutex
+            lw_mirror(rt, work, uid);
+        });
+
     // ---- thread stack queries ----
     const auto stack_free = [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
         const auto thread = thread_table.threads.find(thread_table.current_uid);
