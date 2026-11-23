@@ -879,7 +879,12 @@ HostInputState display_window_input() {
     }
 
     const ControlsConfiguration &controls = vcs_configuration().controls;
-    const int sensitivity = static_cast<int>(controls.mouse_sensitivity);
+#ifdef PSP_PORT_INPUT
+    // The launcher's mouse sensitivity (input.ini, Controllers page) scales the game's own setting.
+    const double sensitivity = controls.mouse_sensitivity * (port_input_settings()->mouse_sensitivity / 100.0);
+#else
+    const double sensitivity = static_cast<double>(controls.mouse_sensitivity);
+#endif
     // A curve rather than a multiply-and-clamp.
     //
     // The axis is a stick deflection, so it is a turn *rate* with a hard
