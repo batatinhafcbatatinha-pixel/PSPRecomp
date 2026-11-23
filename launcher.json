@@ -74,7 +74,154 @@
         "retry_if": "build/native/build.ninja"
       }
     ],
-    "buildtools": false
+    "buildtools": false,
+    "settings": {
+      "ini": "build/native/bin/PSPNative.ini",
+      "section": "Display",
+      "pc_menu": false,
+      "groups": [
+        {
+          "pt": "Vídeo",
+          "en": "Video",
+          "items": [
+            {
+              "key": "InternalResolutionMode",
+              "section": "Rendering",
+              "pt": "Resolução interna",
+              "en": "Internal resolution",
+              "default": 0,
+              "restart": true,
+              "help_pt": "Abaixo da tela, o FSR amplia a imagem; a do PSP (480x272) é a mais leve.",
+              "help_en": "Below the screen's, FSR enlarges the picture; the PSP's own (480x272) is the lightest.",
+              "choices": [
+                {
+                  "v": 0,
+                  "pt": "A da tela",
+                  "en": "The screen's",
+                  "word": "Desktop"
+                },
+                {
+                  "v": 1,
+                  "pt": "Multiplicar a do PSP",
+                  "en": "A multiple of the PSP's",
+                  "word": "Scale"
+                },
+                {
+                  "v": 2,
+                  "pt": "A do PSP (480x272)",
+                  "en": "The PSP's (480x272)",
+                  "word": "PSP"
+                }
+              ]
+            },
+            {
+              "key": "InternalScale",
+              "section": "Rendering",
+              "pt": "Multiplicador da resolução",
+              "en": "Resolution multiple",
+              "default": 2,
+              "min": 1,
+              "max": 8,
+              "restart": true,
+              "help_pt": "Usado com \"Multiplicar a do PSP\": 2 = 960x544, 4 = 1920x1088, 8 = 3840x2176.",
+              "help_en": "Used with \"A multiple of the PSP's\": 2 = 960x544, 4 = 1920x1088, 8 = 3840x2176."
+            },
+            {
+              "key": "UpscaleFilter",
+              "pt": "Ampliação da imagem",
+              "en": "Picture scaling",
+              "default": 1,
+              "restart": true,
+              "choices": [
+                {
+                  "v": 0,
+                  "pt": "Pixels nítidos",
+                  "en": "Sharp pixels",
+                  "word": "Nearest"
+                },
+                {
+                  "v": 1,
+                  "pt": "Suave (bilinear)",
+                  "en": "Smooth (bilinear)",
+                  "word": "Bilinear"
+                },
+                {
+                  "v": 2,
+                  "pt": "AMD FSR 1.0",
+                  "en": "AMD FSR 1.0",
+                  "word": "FSR"
+                }
+              ]
+            },
+            {
+              "key": "AspectRatio",
+              "pt": "Proporção",
+              "en": "Aspect",
+              "default": 1,
+              "restart": true,
+              "help_pt": "Esticar preenche telas widescreen e ultrawide.",
+              "help_en": "Stretching fills widescreen and ultrawide screens.",
+              "choices": [
+                {
+                  "v": 0,
+                  "pt": "Manter a do PSP",
+                  "en": "Keep the PSP's",
+                  "word": "Preserve"
+                },
+                {
+                  "v": 1,
+                  "pt": "Esticar na janela",
+                  "en": "Stretch to the window",
+                  "word": "Stretch"
+                }
+              ]
+            },
+            {
+              "key": "Fullscreen",
+              "pt": "Tela cheia",
+              "en": "Fullscreen",
+              "default": 1,
+              "restart": true,
+              "choices": [
+                {
+                  "v": 0,
+                  "pt": "Desligado",
+                  "en": "Off",
+                  "word": "false"
+                },
+                {
+                  "v": 1,
+                  "pt": "Ligado",
+                  "en": "On",
+                  "word": "true"
+                }
+              ]
+            },
+            {
+              "key": "ShowFPS",
+              "pt": "Mostrar FPS",
+              "en": "Show FPS",
+              "default": 0,
+              "restart": true,
+              "choices": [
+                {
+                  "v": 0,
+                  "pt": "Desligado",
+                  "en": "Off",
+                  "word": "false"
+                },
+                {
+                  "v": 1,
+                  "pt": "Ligado",
+                  "en": "On",
+                  "word": "true"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
   },
   "generic_label": "^[A-Z]{4}-\\d{5}$"
 }
