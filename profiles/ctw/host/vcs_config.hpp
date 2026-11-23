@@ -58,6 +58,11 @@ struct DisplayConfiguration {
     int adapter{-1};
     // NVIDIA's DLSS preset with UpscaleFilter=DLSS: 0 performance, 1 balanced, 2 quality, 3 ultra performance, 5 DLAA.
     int dlss_quality{2};
+    // Dlss5=true: NVIDIA DLSS Neural Rendering on the frame (port_dlss), when the player put nvngx_dlssnr.dll next to
+    // the game. Strength 0..100 and style (0 default, 1 natural, 2 cinematic).
+    bool dlss5{false};
+    int dlss5_strength{50};
+    int dlss5_style{0};
 };
 
 struct PresentationRectangle {

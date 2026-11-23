@@ -269,6 +269,10 @@ struct Dx12GeState {
     ComPtr<ID3D12Resource> dlss_output, dlss_depth, dlss_motion;
     std::uint32_t dlss_srv{}, dlss_out_w{}, dlss_out_h{}, dlss_in_w{}, dlss_in_h{};
     bool dlss_reset{true};
+    // Dlss5: Neural Rendering output (UAV, then the frame the rest of presentation reads) and its zero inputs.
+    ComPtr<ID3D12Resource> nr_output, nr_depth, nr_motion;
+    std::uint32_t nr_srv{}, nr_w{}, nr_h{};
+    bool nr_reset{true}, nr_reported{false};
     UINT next_sampler{1u};
     std::unordered_map<std::uint32_t, Dx12FramebufferTarget> frame_targets;
     ComPtr<ID3D12Resource> readback_buffer;
@@ -2472,7 +2476,68 @@ bool record_direct_present(Dx12GeState &s, Dx12FramebufferTarget &source,
     resolve_target_for_sampling(s, source, false);
     std::uint32_t present_srv = source.srv_index;
     bool dlss_done = false;
+    ID3D12Resource *frame_color = source.color.Get();
+    D3D12_RESOURCE_STATES frame_state = source.color_state;
 #ifdef PORT_DLSS
+    // Dlss5: NVIDIA DLSS Neural Rendering on the frame at its render size, before it is enlarged.
+    if (vcs_configuration().display.dlss5 && !port_dlss_nr_failed()) {
+        const std::uint32_t tw = s.target_width, th = s.target_height;
+        const D3D12_RESOURCE_STATES read = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        bool ready = true;
+        if (s.nr_w != tw || s.nr_h != th) {
+            std::string ignored;
+            (void)wait_for_gpu(s, ignored);
+            D3D12_HEAP_PROPERTIES heap{};
+            heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+            auto make = [&](ComPtr<ID3D12Resource> &out, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags) {
+                D3D12_RESOURCE_DESC desc{};
+                desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                desc.Width = tw; desc.Height = th; desc.DepthOrArraySize = 1u; desc.MipLevels = 1u;
+                desc.Format = format; desc.SampleDesc.Count = 1u; desc.Flags = flags;
+                out.Reset();
+                return SUCCEEDED(s.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, read, nullptr,
+                                                                   IID_PPV_ARGS(&out)));
+            };
+            ready = make(s.nr_output, kColorFormat, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) &&
+                    make(s.nr_depth, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE) &&
+                    make(s.nr_motion, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE);
+            if (ready) {
+                if (s.nr_srv == 0u) s.nr_srv = allocate_texture_srv(s);
+                D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+                view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                view.Format = kColorFormat;
+                view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                view.Texture2D.MipLevels = 1u;
+                s.device->CreateShaderResourceView(s.nr_output.Get(), &view, srv_cpu(s, s.nr_srv));
+                s.nr_w = tw; s.nr_h = th; s.nr_reset = true;
+            } else {
+                s.nr_w = s.nr_h = 0u;
+            }
+        }
+        if (ready && s.nr_srv != 0u) {
+            PortDlssNrSettings nr;
+            port_dlss_nr_defaults(&nr);
+            nr.intensity = static_cast<float>(vcs_configuration().display.dlss5_strength) / 100.0f;
+            nr.style = vcs_configuration().display.dlss5_style;
+            transition(s.list.Get(), source.color.Get(), source.color_state, read);
+            transition(s.list.Get(), s.nr_output.Get(), read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            const bool done = port_dlss_nr_d3d12_evaluate(s.list.Get(), source.color.Get(), s.nr_depth.Get(),
+                                                          s.nr_motion.Get(), s.nr_output.Get(), tw, th, &nr,
+                                                          s.nr_reset ? 1 : 0) != 0;
+            transition(s.list.Get(), s.nr_output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
+            transition(s.list.Get(), source.color.Get(), read, source.color_state);
+            if (done) {
+                frame_color = s.nr_output.Get();
+                frame_state = read;
+                present_srv = s.nr_srv;
+                s.nr_reset = false;
+            } else if (!s.nr_reported) {
+                runtime_log_line(std::string(port_dlss_error()) + "; the frame is shown without it");
+                s.nr_reported = true;
+            }
+        }
+    }
     if (vcs_configuration().display.upscale_filter == DisplayUpscaleFilter::Dlss && port_dlss_ready()) {
         const PresentationRectangle area = calculate_presentation_rectangle(
             s.swap_width, s.swap_height, s.target_width, s.target_height,
@@ -2519,14 +2584,14 @@ bool record_direct_present(Dx12GeState &s, Dx12FramebufferTarget &source,
                 }
             }
             if (ready && s.dlss_srv != 0u) {
-                transition(s.list.Get(), source.color.Get(), source.color_state, read);
+                transition(s.list.Get(), frame_color, frame_state, read);
                 transition(s.list.Get(), s.dlss_output.Get(), read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                dlss_done = port_dlss_d3d12_evaluate(s.list.Get(), source.color.Get(), s.dlss_depth.Get(),
+                dlss_done = port_dlss_d3d12_evaluate(s.list.Get(), frame_color, s.dlss_depth.Get(),
                                                      s.dlss_motion.Get(), s.dlss_output.Get(), tw, th, ow, oh,
                                                      vcs_configuration().display.dlss_quality, 0.0f, 0.0f,
                                                      s.dlss_reset ? 1 : 0) != 0;
                 transition(s.list.Get(), s.dlss_output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
-                transition(s.list.Get(), source.color.Get(), read, source.color_state);
+                transition(s.list.Get(), frame_color, read, frame_state);
                 if (dlss_done) { present_srv = s.dlss_srv; s.dlss_reset = false; }
             }
         }
@@ -2982,7 +3047,7 @@ bool create_backend(Dx12GeState &s, std::string &error) noexcept {
     if (FAILED(hr)) { error = hr_text(hr, "D3D12CreateDevice(DX12 GE)"); return false; }
     select_depth_and_msaa(s);
 #ifdef PORT_DLSS
-    if (vcs_configuration().display.upscale_filter == DisplayUpscaleFilter::Dlss) {
+    if (vcs_configuration().display.upscale_filter == DisplayUpscaleFilter::Dlss || vcs_configuration().display.dlss5) {
         if (port_dlss_d3d12_start(s.device.Get()))
             runtime_log_line("DLSS ready (NVIDIA NGX, quality preset " +
                              std::to_string(vcs_configuration().display.dlss_quality) + ")");
@@ -3083,6 +3148,8 @@ void destroy_backend(Dx12GeState &s) noexcept {
 #ifdef PORT_DLSS
     port_dlss_d3d12_stop();
     s.dlss_output.Reset(); s.dlss_depth.Reset(); s.dlss_motion.Reset();
+    s.nr_output.Reset(); s.nr_depth.Reset(); s.nr_motion.Reset();
+    s.nr_w = s.nr_h = 0u;
     s.dlss_out_w = s.dlss_out_h = s.dlss_in_w = s.dlss_in_h = 0u;
 #endif
     for (Dx12FrameResources &frame : s.frames) {

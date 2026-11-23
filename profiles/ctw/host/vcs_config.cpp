@@ -290,6 +290,20 @@ void apply_display_key(VcsConfiguration &config, const std::string &key,
             warning(config, line, "Display.IntegerScale expects true/false");
         return;
     }
+    if (key == "dlss5") {
+        if (!parse_bool(value, config.display.dlss5))
+            warning(config, line, "Display.Dlss5 expects true/false");
+        return;
+    }
+    if (key == "dlss5strength") {
+        config.display.dlss5_strength = std::clamp(static_cast<int>(std::strtol(trim_copy(value).c_str(), nullptr, 10)), 0, 100);
+        return;
+    }
+    if (key == "dlss5style") {
+        const std::string v = lowercase_copy(trim_copy(value));
+        config.display.dlss5_style = v == "natural" || v == "1" ? 1 : v == "cinematic" || v == "2" ? 2 : 0;
+        return;
+    }
     if (key == "dlssquality") {
         const std::string q = lowercase_copy(trim_copy(value));
         config.display.dlss_quality = q == "performance" ? 0 : q == "balanced" ? 1 : q == "ultraperformance" ? 3

@@ -203,6 +203,66 @@
               ]
             },
             {
+              "key": "Dlss5",
+              "pt": "DLSS 5 (Neural Rendering)",
+              "en": "DLSS 5 (Neural Rendering)",
+              "default": 0,
+              "restart": true,
+              "help_pt": "Precisa do nvngx_dlssnr.dll que você mesmo colocar ao lado do jogo (a NVIDIA não publica; roda em RTX 50). Sem ele, nada muda.",
+              "help_en": "Needs nvngx_dlssnr.dll that you put next to the game yourself (NVIDIA does not publish it; runs on RTX 50). Without it, nothing changes.",
+              "choices": [
+                {
+                  "v": 0,
+                  "pt": "Desligado",
+                  "en": "Off",
+                  "word": "false"
+                },
+                {
+                  "v": 1,
+                  "pt": "Ligado",
+                  "en": "On",
+                  "word": "true"
+                }
+              ]
+            },
+            {
+              "key": "Dlss5Strength",
+              "pt": "Força do DLSS 5",
+              "en": "DLSS 5 strength",
+              "default": 50,
+              "min": 0,
+              "max": 100,
+              "step": 5,
+              "restart": true
+            },
+            {
+              "key": "Dlss5Style",
+              "pt": "Estilo do DLSS 5",
+              "en": "DLSS 5 style",
+              "default": 0,
+              "restart": true,
+              "choices": [
+                {
+                  "v": 0,
+                  "pt": "Padrão",
+                  "en": "Default",
+                  "word": "Default"
+                },
+                {
+                  "v": 1,
+                  "pt": "Natural",
+                  "en": "Natural",
+                  "word": "Natural"
+                },
+                {
+                  "v": 2,
+                  "pt": "Cinematográfico",
+                  "en": "Cinematic",
+                  "word": "Cinematic"
+                }
+              ]
+            },
+            {
               "key": "AspectRatio",
               "pt": "Proporção",
               "en": "Aspect",
