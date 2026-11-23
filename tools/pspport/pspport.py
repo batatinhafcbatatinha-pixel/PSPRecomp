@@ -215,6 +215,17 @@ def step_play(port, args):
     # Untranslated code runs interpreted; the addresses go to build/learned.txt for the next translation.
     # input.ini in the port folder: this game's controller settings (port_input), over the global ones.
     env = {**os.environ, 'PSPRECOMP_LEARN_FILE': str(port.build / 'learned.txt'), 'PORT_INPUT_GAME_DIR': str(port.dir)}
+    # [Rendering] GraphicsApi=Vulkan: Direct3D 12 on Vulkan through vkd3d-proton and DXVK (vulkan_layer.py).
+    import configparser
+    sys.path.insert(0, str(Path(__file__).resolve().parent))   # vulkan_layer.py, next to this script
+    import vulkan_layer
+    ini = configparser.ConfigParser(strict=False, inline_comment_prefixes=(';', '#'), interpolation=None)
+    try:
+        ini.read(port.exe.parent / 'PSPNative.ini', encoding='utf-8')
+    except configparser.Error:
+        pass
+    api = ini.get('Rendering', 'GraphicsApi', fallback='Native').strip().lower()
+    vulkan_layer.stage(port.exe.parent, 'd3d12', api == 'vulkan', Path(__file__).resolve().parents[2] / '.local/downloads/vulkan')
     r = subprocess.run([str(port.exe), str(port.eboot), str(port.files)], cwd=port.exe.parent, env=env)
     sys.exit(r.returncode)
 

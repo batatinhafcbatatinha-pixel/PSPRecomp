@@ -391,6 +391,10 @@ void apply_rendering_key(VcsConfiguration &config, const std::string &key,
         config.rendering.depth_precision = bits;
         return;
     }
+    if (key == "graphicsapi") {
+        // Native | Vulkan: read by pspport play, which puts vkd3d-proton and DXVK next to the game for Vulkan.
+        return;
+    }
     if (key == "smaa" || key == "antialiasing") {
         if (!parse_bool(value, config.rendering.smaa))
             warning(config, line, "Rendering.SMAA expects true/false");
