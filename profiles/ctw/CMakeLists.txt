@@ -100,10 +100,8 @@ if(WIN32)
             "${CTW_PROFILE_DIR}/third_party/ffmpeg/COPYING.LGPLv2.1"
             "$<TARGET_FILE_DIR:CTWNative>/COPYING.LGPLv2.1")
 else()
-    foreach(CTW_FFMPEG_LIB avcodec avformat avutil swresample swscale)
-        find_library(CTW_SYSTEM_${CTW_FFMPEG_LIB} NAMES ${CTW_FFMPEG_LIB} REQUIRED)
-        target_link_libraries(CTWNative PRIVATE ${CTW_SYSTEM_${CTW_FFMPEG_LIB}})
-    endforeach()
+    include("${PROJECT_SOURCE_DIR}/tools/native/posix.cmake")
+    psprecomp_posix_host(CTWNative "${CMAKE_CURRENT_SOURCE_DIR}/host")
 endif()
 
 if(MSVC)

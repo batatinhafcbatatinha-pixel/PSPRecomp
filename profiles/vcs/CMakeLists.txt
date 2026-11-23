@@ -157,20 +157,8 @@ function(vcs_target_common target)
         endforeach()
         target_link_libraries(${target} PRIVATE winmm d3d12 dxgi d3dcompiler dxguid)
     else()
-        # The profile vendors FFmpeg 7 headers. Some validation hosts install only
-        # the versioned runtime sonames (without development symlinks), so accept
-        # the matching FFmpeg 7 ABI names as fallbacks.
-        set(VCS_FFMPEG_avcodec_NAMES avcodec libavcodec.so.61)
-        set(VCS_FFMPEG_avformat_NAMES avformat libavformat.so.61)
-        set(VCS_FFMPEG_avutil_NAMES avutil libavutil.so.59)
-        set(VCS_FFMPEG_swresample_NAMES swresample libswresample.so.5)
-        set(VCS_FFMPEG_swscale_NAMES swscale libswscale.so.8)
-        foreach(VCS_FFMPEG_LIB avcodec avformat avutil swresample swscale)
-            find_library(VCS_SYSTEM_${VCS_FFMPEG_LIB}
-                NAMES ${VCS_FFMPEG_${VCS_FFMPEG_LIB}_NAMES}
-                REQUIRED)
-            target_link_libraries(${target} PRIVATE ${VCS_SYSTEM_${VCS_FFMPEG_LIB}})
-        endforeach()
+        include("${PROJECT_SOURCE_DIR}/tools/native/posix.cmake")
+        psprecomp_posix_host(${target} "${CMAKE_CURRENT_SOURCE_DIR}/host")
     endif()
     psprecomp_enable_host_avx(${target})
 endfunction()

@@ -89,5 +89,77 @@
       "retry_if": "build/native/build.ninja"
     }
   ],
-  "buildtools": false
+  "buildtools": false,
+  "linux": {
+    "play": "Play.sh",
+    "exe": "build/native/bin/CTWNative",
+    "tools": [
+      "llvm",
+      "cmake",
+      "ninja"
+    ],
+    "steps": [
+      {
+        "name": "Decrypt, translate and prepare your game (PSPRecomp tools, pspdecrypt)",
+        "run": [
+          "{python}",
+          "../../tools/pspport/posix_profile.py",
+          "prepare",
+          "--port",
+          "{root}"
+        ],
+        "done_if": "build/gen/generated_registry.cpp",
+        "prepare": true
+      },
+      {
+        "name": "Compile",
+        "run": [
+          "{python}",
+          "../../tools/pspport/posix_profile.py",
+          "compile",
+          "--port",
+          "{root}",
+          "--jobs",
+          "{jobs}"
+        ],
+        "retry_if": "build/native/build.ninja"
+      }
+    ]
+  },
+  "macos": {
+    "play": "Play.sh",
+    "exe": "build/native/bin/CTWNative",
+    "tools": [
+      "llvm",
+      "cmake",
+      "ninja"
+    ],
+    "steps": [
+      {
+        "name": "Decrypt, translate and prepare your game (PSPRecomp tools, pspdecrypt)",
+        "run": [
+          "{python}",
+          "../../tools/pspport/posix_profile.py",
+          "prepare",
+          "--port",
+          "{root}"
+        ],
+        "done_if": "build/gen/generated_registry.cpp",
+        "prepare": true
+      },
+      {
+        "name": "Compile",
+        "run": [
+          "{python}",
+          "../../tools/pspport/posix_profile.py",
+          "compile",
+          "--port",
+          "{root}",
+          "--jobs",
+          "{jobs}"
+        ],
+        "retry_if": "build/native/build.ninja"
+      }
+    ]
+  }
 }

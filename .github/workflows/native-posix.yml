@@ -1,0 +1,40 @@
+name: Native Linux and macOS
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cxx: g++
+          - os: ubuntu-latest
+            cxx: clang++
+          - os: macos-15
+            cxx: clang++
+          - os: macos-15-intel
+            cxx: clang++
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang g++ ninja-build pkg-config libsdl2-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja pkg-config sdl2 ffmpeg
+      - name: Build tools and native host libraries without game content
+        env:
+          CXX: ${{ matrix.cxx }}
+        run: bash tools/build-posix.sh
+      - name: Script and configuration checks
+        run: |
+          for f in tools/build-posix.sh profiles/*/*.sh; do bash -n "$f"; done
+          python3 -m py_compile tools/pspport/pspport.py tools/pspport/posix_profile.py
+          python3 -c "import json; [json.load(open(f, encoding='utf-8')) for f in ('launcher.json', 'profiles/ctw/setup.json')]"
+      - name: Framework tests
+        run: ctest --test-dir build/posix --output-on-failure

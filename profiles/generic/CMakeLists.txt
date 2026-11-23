@@ -91,10 +91,8 @@ if(WIN32)
             "${GENERIC_HOST_DIR}/third_party/ffmpeg/COPYING.LGPLv2.1"
             "$<TARGET_FILE_DIR:PSPNative>/COPYING.LGPLv2.1")
 else()
-    foreach(LIB avcodec avformat avutil swresample swscale)
-        find_library(GENERIC_SYSTEM_${LIB} NAMES ${LIB} REQUIRED)
-        target_link_libraries(PSPNative PRIVATE ${GENERIC_SYSTEM_${LIB}})
-    endforeach()
+    include("${PROJECT_SOURCE_DIR}/tools/native/posix.cmake")
+    psprecomp_posix_host(PSPNative "${CMAKE_CURRENT_SOURCE_DIR}/../ctw/host")
 endif()
 
 if(MSVC)

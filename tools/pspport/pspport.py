@@ -16,6 +16,8 @@ A port folder holds game_files/ (the UMD, copied and checked by the launcher). E
   play       run the game
 """
 import argparse
+import hashlib
+import json
 import io
 import os
 import shutil
@@ -33,6 +35,7 @@ FW = WORK / 'fw'
 LOAD_BASE = '0x08804000'   # where the PSP kernel loads a user-mode PRX (EBOOT); fixed-address ELFs keep their own
 UNIT_SPAN = '0x8000'
 
+PSPDECRYPT_SHA256 = '0d01400abf40260a12c41cfb201ca0d326767f5b5c9374c5fbeb0504fd6a6db2'
 PSPDECRYPT_COMMIT = 'c156627db7634d395c380c0a9589130f603307fc'
 PSPDECRYPT_URL = f'https://codeload.github.com/John-K/pspdecrypt/zip/{PSPDECRYPT_COMMIT}'
 PRXDECRYPT_MAIN = r'''// Decrypts one PRX/EBOOT with pspdecrypt's PRX decrypter (written by tools/pspport).
@@ -81,6 +84,22 @@ def run(cmd, cwd=None, env=None):
         raise SystemExit(f'failed ({r.returncode}): {cmd[0]}')
 
 
+def native_tool_path():
+    if os.name == 'nt':
+        return
+    key = 'macos' if sys.platform == 'darwin' else 'linux'
+    config = json.loads((REPO / 'launcher.json').read_text(encoding='utf-8'))
+    directories = []
+    for tool in config.get(key, {}).get('deps', {}).get('tools', []):
+        if tool.get('check'):
+            executable = REPO / tool['check']
+            if executable.is_file():
+                directories.append(str(executable.parent))
+    if sys.platform == 'darwin':
+        directories.extend(p for p in ('/opt/homebrew/bin', '/usr/local/bin') if Path(p).is_dir())
+    os.environ['PATH'] = os.pathsep.join([*directories, os.environ.get('PATH', '')])
+
+
 def need(name):
     path = shutil.which(name)
     if not path:
@@ -127,6 +146,8 @@ def prxdecrypt():
         log(f'Downloading pspdecrypt {PSPDECRYPT_COMMIT[:10]} (John-K, GPL-3.0; compiled and kept on this PC only)')
         with urllib.request.urlopen(urllib.request.Request(PSPDECRYPT_URL, headers={'User-Agent': 'pspport'}), timeout=120) as r:
             data = r.read()
+        if hashlib.sha256(data).hexdigest() != PSPDECRYPT_SHA256:
+            raise SystemExit('pspdecrypt archive SHA-256 mismatch')
         shutil.rmtree(src.parent, ignore_errors=True)
         src.parent.mkdir(parents=True)
         with zipfile.ZipFile(io.BytesIO(data)) as z:
@@ -139,7 +160,7 @@ def prxdecrypt():
         obj = src.parent / (c.stem + '.o')
         run([need('clang'), '-c', '-O2', '-w', '-o', obj, c], cwd=src)
         objs.append(obj)
-    run([need('clang++'), '-O2', '-std=c++17', '-w', '-static', '-o', exe, 'prxdecrypt_main.cpp', *objs], cwd=src)
+    run([need('clang++'), '-O2', '-std=c++17', '-w', *(['-static'] if os.name == 'nt' else []), '-o', exe, 'prxdecrypt_main.cpp', *objs], cwd=src)
     return exe
 
 
@@ -188,6 +209,10 @@ def step_translate(port, args):
 
 
 def step_ffmpeg(port, args):
+    if os.name != 'nt':
+        run([need('pkg-config'), '--exists', 'libavcodec', 'libavformat', 'libavutil',
+             'libswresample', 'libswscale', 'sdl2'])
+        return
     if (REPO / 'profiles/ctw/third_party/ffmpeg/lib/avcodec.lib').is_file() and not args.force:
         log('- FFmpeg: already downloaded')
         return
@@ -215,6 +240,9 @@ def step_play(port, args):
     # Untranslated code runs interpreted; the addresses go to build/learned.txt for the next translation.
     # input.ini in the port folder: this game's controller settings (port_input), over the global ones.
     env = {**os.environ, 'PSPRECOMP_LEARN_FILE': str(port.build / 'learned.txt'), 'PORT_INPUT_GAME_DIR': str(port.dir)}
+    if os.name != 'nt':
+        r = subprocess.run([str(port.exe), str(port.eboot), str(port.files)], cwd=port.exe.parent, env=env)
+        raise SystemExit(r.returncode)
     # [Rendering] GraphicsApi=Vulkan: Direct3D 12 on Vulkan through vkd3d-proton and DXVK (vulkan_layer.py).
     import configparser
     sys.path.insert(0, str(Path(__file__).resolve().parent))   # vulkan_layer.py, next to this script
@@ -239,6 +267,7 @@ STEPS = {'tools': step_tools, 'decrypt': step_decrypt, 'translate': step_transla
 
 
 def main():
+    native_tool_path()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('step', choices=STEPS)
     ap.add_argument('--port', default='.')

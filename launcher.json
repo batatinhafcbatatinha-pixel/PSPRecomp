@@ -445,5 +445,186 @@
       ]
     }
   },
-  "generic_label": "^[A-Z]{4}-\\d{5}$"
+  "generic_label": "^[A-Z]{4}-\\d{5}$",
+  "linux": {
+    "exe": "build/native/bin/CTWNative",
+    "ini": "build/native/bin/CTWNative.ini",
+    "packages": {
+      "apt": [
+        "clang",
+        "pkg-config",
+        "libsdl2-dev",
+        "libavcodec-dev",
+        "libavformat-dev",
+        "libavutil-dev",
+        "libswscale-dev",
+        "libswresample-dev"
+      ],
+      "dnf": [
+        "clang",
+        "pkgconf-pkg-config",
+        "SDL2-devel",
+        "ffmpeg-free-devel"
+      ],
+      "pacman": [
+        "clang",
+        "pkgconf",
+        "sdl2",
+        "ffmpeg"
+      ],
+      "zypper": [
+        "clang",
+        "pkg-config",
+        "libSDL2-devel",
+        "ffmpeg-7-libavcodec-devel",
+        "ffmpeg-7-libavformat-devel",
+        "ffmpeg-7-libavutil-devel",
+        "ffmpeg-7-libswscale-devel",
+        "ffmpeg-7-libswresample-devel"
+      ]
+    },
+    "deps": {
+      "buildtools_gb": 0.5,
+      "python_gb": 0.1,
+      "tools": [
+        {
+          "id": "llvm",
+          "name": "Clang",
+          "check": null,
+          "gb": 0
+        },
+        {
+          "id": "cmake",
+          "name": "CMake 3.31.12",
+          "check": ".local/tools/cmake-3.31.12/bin/cmake",
+          "gb": 0.1
+        },
+        {
+          "id": "ninja",
+          "name": "Ninja 1.13.2",
+          "check": ".local/tools/ninja-1.13.2/ninja",
+          "gb": 0.01
+        }
+      ]
+    },
+    "generic": {
+      "play": "Play.cmd",
+      "exe": "build/native/bin/PSPNative",
+      "disk_gb": 10,
+      "download_gb": 1.2,
+      "minutes": "60-180",
+      "tools": [
+        "llvm",
+        "cmake",
+        "ninja"
+      ],
+      "gb_per_job": 3,
+      "steps": [
+        {
+          "name": "Decrypt and translate your game (PSPRecomp)",
+          "run": [
+            "{python}",
+            "../../../tools/pspport/pspport.py",
+            "prepare",
+            "--port",
+            "{root}"
+          ],
+          "done_if": "build/gen/generated_registry.cpp",
+          "prepare": true
+        },
+        {
+          "name": "Compile",
+          "run": [
+            "{python}",
+            "../../../tools/pspport/pspport.py",
+            "compile",
+            "--port",
+            "{root}",
+            "--jobs",
+            "{jobs}"
+          ],
+          "retry_if": "build/native/build.ninja"
+        }
+      ],
+      "buildtools": false,
+      "play_sh": "#!/usr/bin/env bash\n# Starts this game (built by the launcher with tools/pspport).\nhere=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nexec \"${PYTHON:-python3}\" \"$here/../../../tools/pspport/pspport.py\" play --port \"$here\" \"$@\"\n"
+    }
+  },
+  "macos": {
+    "exe": "build/native/bin/CTWNative",
+    "ini": "build/native/bin/CTWNative.ini",
+    "packages": {
+      "brew": [
+        "pkg-config",
+        "sdl2",
+        "ffmpeg"
+      ]
+    },
+    "deps": {
+      "buildtools_gb": 1.5,
+      "python_gb": 0.1,
+      "tools": [
+        {
+          "id": "llvm",
+          "name": "Clang",
+          "check": null,
+          "gb": 0
+        },
+        {
+          "id": "cmake",
+          "name": "CMake 3.31.12",
+          "check": ".local/tools/cmake-3.31.12/CMake.app/Contents/bin/cmake",
+          "gb": 0.1
+        },
+        {
+          "id": "ninja",
+          "name": "Ninja 1.13.2",
+          "check": ".local/tools/ninja-1.13.2/ninja",
+          "gb": 0.01
+        }
+      ]
+    },
+    "generic": {
+      "play": "Play.cmd",
+      "exe": "build/native/bin/PSPNative",
+      "disk_gb": 10,
+      "download_gb": 1.2,
+      "minutes": "60-180",
+      "tools": [
+        "llvm",
+        "cmake",
+        "ninja"
+      ],
+      "gb_per_job": 3,
+      "steps": [
+        {
+          "name": "Decrypt and translate your game (PSPRecomp)",
+          "run": [
+            "{python}",
+            "../../../tools/pspport/pspport.py",
+            "prepare",
+            "--port",
+            "{root}"
+          ],
+          "done_if": "build/gen/generated_registry.cpp",
+          "prepare": true
+        },
+        {
+          "name": "Compile",
+          "run": [
+            "{python}",
+            "../../../tools/pspport/pspport.py",
+            "compile",
+            "--port",
+            "{root}",
+            "--jobs",
+            "{jobs}"
+          ],
+          "retry_if": "build/native/build.ninja"
+        }
+      ],
+      "buildtools": false,
+      "play_sh": "#!/usr/bin/env bash\n# Starts this game (built by the launcher with tools/pspport).\nhere=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nexec \"${PYTHON:-python3}\" \"$here/../../../tools/pspport/pspport.py\" play --port \"$here\" \"$@\"\n"
+    }
+  }
 }

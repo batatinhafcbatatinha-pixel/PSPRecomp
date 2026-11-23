@@ -12,6 +12,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(PSPRECOMP_BUILD_TESTS "Build reusable PSPRecomp tests" ON)
+option(PSPRECOMP_BUILD_NATIVE_HOST "Linux/macOS: compile the shared host libraries (SDL2 + FFmpeg) without game content" OFF)
 option(PSPRECOMP_BUILD_PROFILE_TESTS "Build tests supplied by the selected profile" ON)
 set(PSPRECOMP_PROFILE "" CACHE STRING "Profile to build from profiles/<name>; empty builds only the framework")
 
@@ -99,6 +100,11 @@ else()
     target_compile_options(psprecomp_core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
 endif()
 
+if(UNIX)
+    find_package(Threads REQUIRED)
+    target_link_libraries(psprecomp_core PUBLIC Threads::Threads)
+endif()
+
 add_executable(psp_analyze tools/analyzer_main.cpp)
 target_link_libraries(psp_analyze PRIVATE psprecomp_core)
 
@@ -126,6 +132,10 @@ if(PSPRECOMP_BUILD_TESTS)
     target_compile_definitions(psprecomp_tests PRIVATE
         PSPRECOMP_CODEGEN_PATH="$<TARGET_FILE:psp_recomp>")
     add_test(NAME psprecomp_tests COMMAND psprecomp_tests)
+endif()
+
+if(PSPRECOMP_BUILD_NATIVE_HOST AND UNIX)
+    add_subdirectory(tools/native)
 endif()
 
 if(NOT PSPRECOMP_PROFILE STREQUAL "")
