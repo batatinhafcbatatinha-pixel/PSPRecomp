@@ -34,6 +34,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <thread>
+#ifdef PSP_PORT_INPUT
+#include "port_input.h"
+#endif
 
 namespace vcs {
 namespace {
@@ -223,14 +226,57 @@ constexpr std::uint16_t kPadY = 0x8000u;
 // Analog sticks arrive as signed 16-bit and leave as the PSP's 0..255 with 128
 // at rest. The dead zone is applied before the rescale so the rest position is
 // exactly 128 rather than a value that drifts by a unit or two.
-[[nodiscard]] std::uint8_t stick_to_psp(std::int16_t value, bool invert) noexcept {
-    constexpr int kDeadZone = 7849;  // XInput's own documented left-stick figure
+// dead_zone: XInput's own documented left-stick figure by default; 0 for a pad port_input already shaped.
+[[nodiscard]] std::uint8_t stick_to_psp(std::int16_t value, bool invert, int dead_zone = 7849) noexcept {
+    const int kDeadZone = dead_zone;
     int magnitude = std::abs(static_cast<int>(value));
     if (magnitude <= kDeadZone) return 128u;
     magnitude = (magnitude - kDeadZone) * 32767 / (32767 - kDeadZone);
     int signed_value = value < 0 ? -magnitude : magnitude;
     if (invert) signed_value = -signed_value;
     return static_cast<std::uint8_t>(std::clamp(128 + signed_value * 127 / 32767, 0, 255));
+}
+
+// The host pad for player 1, in XInput's shape. With PSP_PORT_INPUT (the generic profile) and SDL3.dll next to the
+// game, port_input reads it: every controller SDL knows, with the player's controller choice, remaps, dead zone,
+// sensitivity (input.ini, the launcher's Controllers page); shaped is then true (the dead zone is already applied).
+// Otherwise XInput, as before.
+[[nodiscard]] bool read_host_pad(XInputStatePacket &pad, bool &shaped) noexcept {
+    shaped = false;
+#ifdef PSP_PORT_INPUT
+    static int port_input = -1;
+    if (port_input < 0) {
+        char dir[MAX_PATH]{};
+        GetModuleFileNameA(nullptr, dir, MAX_PATH);
+        if (char *slash = std::strrchr(dir, '\\')) *slash = 0;
+        const char *off = std::getenv("PSPRECOMP_PORT_INPUT");
+        port_input = !(off && off[0] == '0') && port_input_start(dir, nullptr);
+    }
+    if (port_input) {
+        port_input_update();
+        PortPad p{};
+        port_input_pad(0, &p);
+        if (!p.connected) return false;
+        static constexpr struct { std::uint32_t from; std::uint16_t to; } kMap[] = {
+            {PORT_BTN_A, kPadA}, {PORT_BTN_B, kPadB}, {PORT_BTN_X, kPadX}, {PORT_BTN_Y, kPadY},
+            {PORT_BTN_LB, kPadLeftShoulder}, {PORT_BTN_RB, kPadRightShoulder}, {PORT_BTN_START, kPadStart},
+            {PORT_BTN_BACK, kPadBack}, {PORT_BTN_UP, kPadDpadUp}, {PORT_BTN_DOWN, kPadDpadDown},
+            {PORT_BTN_LEFT, kPadDpadLeft}, {PORT_BTN_RIGHT, kPadDpadRight}};
+        pad = {};
+        for (const auto &m : kMap)
+            if (p.buttons & m.from) pad.gamepad.buttons |= m.to;
+        pad.gamepad.left_trigger = static_cast<std::uint8_t>(p.lt * 255.0f + 0.5f);
+        pad.gamepad.right_trigger = static_cast<std::uint8_t>(p.rt * 255.0f + 0.5f);
+        pad.gamepad.lx = static_cast<std::int16_t>(p.lx * 32767.0f);
+        pad.gamepad.ly = static_cast<std::int16_t>(-p.ly * 32767.0f);   // SDL's Y points down, XInput's up
+        pad.gamepad.rx = static_cast<std::int16_t>(p.rx * 32767.0f);
+        pad.gamepad.ry = static_cast<std::int16_t>(-p.ry * 32767.0f);
+        shaped = true;
+        return true;
+    }
+#endif
+    const PfnXInputGetState get_state = xinput_get_state();
+    return get_state != nullptr && get_state(0u, &pad) == 0u;
 }
 
 int legacy_configured_scale() {
@@ -871,9 +917,11 @@ HostInputState display_window_input() {
     input.camera_y = camera_response(-mouse_dy);
     if (controls.invert_camera_y) input.camera_y = -input.camera_y;
 
-    if (const PfnXInputGetState get_state = xinput_get_state()) {
+    {
         XInputStatePacket pad{};
-        if (get_state(0u, &pad) == 0u) {
+        bool shaped = false;
+        if (read_host_pad(pad, shaped)) {
+            const int dead_zone = shaped ? 0 : 7849;
             const std::uint16_t b = pad.gamepad.buttons;
             // The pad follows San Andreas' console layout, which is also the
             // scheme ThirteenAG's plugin assumes: cross accelerates and
@@ -912,17 +960,17 @@ HostInputState display_window_input() {
             if (pad.gamepad.right_trigger > 64u) input.accelerate = true;
             if (pad.gamepad.left_trigger > 64u) input.brake = true;
 
-            const std::uint8_t pad_x = stick_to_psp(pad.gamepad.lx, false);
+            const std::uint8_t pad_x = stick_to_psp(pad.gamepad.lx, false, dead_zone);
             // PSP Y grows downwards, the stick's grows upwards.
-            const std::uint8_t pad_y = stick_to_psp(pad.gamepad.ly, true);
+            const std::uint8_t pad_y = stick_to_psp(pad.gamepad.ly, true, dead_zone);
             if (pad_x != 128u || pad_y != 128u) {
                 input.analog_x = pad_x;
                 input.analog_y = pad_y;
             }
             // Not inverted, unlike the left stick: the camera axis reads
             // positive as up, which is the direction the stick already gives.
-            const int camera_x = stick_to_psp(pad.gamepad.rx, false) - 128;
-            int camera_y = stick_to_psp(pad.gamepad.ry, false) - 128;
+            const int camera_x = stick_to_psp(pad.gamepad.rx, false, dead_zone) - 128;
+            int camera_y = stick_to_psp(pad.gamepad.ry, false, dead_zone) - 128;
             if (controls.invert_camera_y) camera_y = -camera_y;
             if (camera_x != 0 || camera_y != 0) {
                 input.camera_x = std::clamp(camera_x, -127, 127);

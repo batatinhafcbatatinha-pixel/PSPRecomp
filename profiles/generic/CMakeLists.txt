@@ -59,6 +59,18 @@ target_compile_definitions(PSPNative PRIVATE
     PSPRECOMP_HOST_INI="PSPNative.ini"
     PSPRECOMP_HOST_TITLE=L"${GENERIC_TITLE}")
 set_target_properties(PSPNative PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+# port_input (third_party/port_input, shared with the other recompilers): every controller SDL3 knows, with the
+# player's controller choice, remaps, dead zones and sensitivities (display_window.cpp read_host_pad).
+if(WIN32)
+    set(GENERIC_PORT_INPUT "${CMAKE_CURRENT_LIST_DIR}/../../third_party/port_input")
+    target_sources(PSPNative PRIVATE "${GENERIC_PORT_INPUT}/port_input.c")
+    # The project has no C compiler enabled: port_input.c is also valid C++.
+    set_source_files_properties("${GENERIC_PORT_INPUT}/port_input.c" PROPERTIES LANGUAGE CXX)
+    target_include_directories(PSPNative PRIVATE "${GENERIC_PORT_INPUT}")
+    target_compile_definitions(PSPNative PRIVATE PSP_PORT_INPUT=1)
+    include("${GENERIC_PORT_INPUT}/port_input.cmake")
+    port_input_stage(PSPNative)
+endif()
 psprecomp_enable_host_avx(PSPNative)
 
 if(WIN32)

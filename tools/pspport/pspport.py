@@ -213,7 +213,8 @@ def step_play(port, args):
     if not port.exe.is_file():
         raise SystemExit('The game is not built yet: install it from the launcher.')
     # Untranslated code runs interpreted; the addresses go to build/learned.txt for the next translation.
-    env = {**os.environ, 'PSPRECOMP_LEARN_FILE': str(port.build / 'learned.txt')}
+    # input.ini in the port folder: this game's controller settings (port_input), over the global ones.
+    env = {**os.environ, 'PSPRECOMP_LEARN_FILE': str(port.build / 'learned.txt'), 'PORT_INPUT_GAME_DIR': str(port.dir)}
     r = subprocess.run([str(port.exe), str(port.eboot), str(port.files)], cwd=port.exe.parent, env=env)
     sys.exit(r.returncode)
 
