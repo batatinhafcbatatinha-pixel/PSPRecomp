@@ -333,8 +333,8 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM wparam, LPAR
         title += std::to_wstring(state.client_width);
         title += L"x";
         title += std::to_wstring(state.client_height);
-        title += state.configuration.upscale_filter == DisplayUpscaleFilter::Bilinear
-                     ? L" bilinear" : L" nearest";
+        title += state.configuration.upscale_filter == DisplayUpscaleFilter::Fsr      ? L" FSR"
+                 : state.configuration.upscale_filter == DisplayUpscaleFilter::Bilinear ? L" bilinear" : L" nearest";
         SetWindowTextW(window, title.c_str());
         return 0;
     }
@@ -392,7 +392,7 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM wparam, LPAR
             // client size.
             const bool scaling = output.width != static_cast<int>(state.width) ||
                                  output.height != static_cast<int>(state.height);
-            if (scaling && state.configuration.upscale_filter == DisplayUpscaleFilter::Bilinear) {
+            if (scaling && state.configuration.upscale_filter != DisplayUpscaleFilter::Nearest) {
                 SetStretchBltMode(context, HALFTONE);
                 SetBrushOrgEx(context, 0, 0, nullptr);
             } else {

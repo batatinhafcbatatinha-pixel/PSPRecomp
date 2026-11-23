@@ -236,7 +236,7 @@ void release_backbuffers(PresenterState &s) noexcept {
 }
 
 [[nodiscard]] bool create_pipeline(PresenterState &s, std::string &error) noexcept {
-    const bool linear = vcs_configuration().display.upscale_filter == DisplayUpscaleFilter::Bilinear;
+    const bool linear = vcs_configuration().display.upscale_filter != DisplayUpscaleFilter::Nearest;
     const char *shader = R"HLSL(
 Texture2D<float4> SourceTexture : register(t0);
 SamplerState SourceSampler : register(s0);

@@ -57,7 +57,65 @@ PresentVertexOutput PresentVS(uint id : SV_VertexID) {
     else { o.position=float4(3,-1,0,1); o.uv=float2(2,1); }
     return o;
 }
+// Present pass state (root constants at b1; the rest of that block is unused here).
+cbuffer PresentState : register(b1) {
+    uint PresentMode;   // 0 sample (point or bilinear, per the sampler), 2 FSR 1.0 EASU
+    uint3 PresentPadding;
+};
+
+// AMD FidelityFX Super Resolution 1.0, EASU (MIT; Copyright (c) 2021 Advanced Micro Devices): the 32-bit path of
+// ffx_fsr1.h, as in the PS2 and Xbox 360 ports' presenters. Enlarges the frame to the window while rebuilding edges.
+float FsrLu(float3 c) { return c.b * 0.5 + (c.r * 0.5 + c.g); }
+float3 FsrLd(int2 p, int2 size) { return CloudTexture0.Load(int3(clamp(p, int2(0, 0), size - 1), 0)).rgb; }
+void FsrEs(inout float2 dir, inout float len, float w, float a, float b, float c, float d, float e) {
+    float lx = max(abs(d - c), abs(c - b)); lx = lx > 0.0 ? 1.0 / lx : 0.0; float dx = d - b; dir.x += dx * w;
+    lx = saturate(abs(dx) * lx); len += lx * lx * w;
+    float ly = max(abs(e - c), abs(c - a)); ly = ly > 0.0 ? 1.0 / ly : 0.0; float dy = e - a; dir.y += dy * w;
+    ly = saturate(abs(dy) * ly); len += ly * ly * w;
+}
+void FsrEt(inout float3 ac, inout float aw, float2 o, float2 dir, float2 len2, float lob, float clp, float3 c) {
+    float2 v = float2(o.x * dir.x + o.y * dir.y, o.x * (-dir.y) + o.y * dir.x) * len2;
+    float d2 = min(dot(v, v), clp);
+    float wb = 0.4 * d2 - 1.0, wa = lob * d2 - 1.0;
+    wb *= wb; wa *= wa; wb = 1.5625 * wb - 0.5625;
+    float w = wb * wa; ac += c * w; aw += w;
+}
+float3 FsrEasu(float2 uv) {
+    uint width, height;
+    CloudTexture0.GetDimensions(width, height);
+    int2 size = int2(width, height);
+    float2 pp = uv * float2(size) - 0.5;
+    float2 fp = floor(pp); pp -= fp; int2 q = int2(fp);
+    float3 b = FsrLd(q + int2(0, -1), size), c = FsrLd(q + int2(1, -1), size), e = FsrLd(q + int2(-1, 0), size),
+           f = FsrLd(q, size), g = FsrLd(q + int2(1, 0), size), h = FsrLd(q + int2(2, 0), size),
+           i = FsrLd(q + int2(-1, 1), size), j = FsrLd(q + int2(0, 1), size), k = FsrLd(q + int2(1, 1), size),
+           l = FsrLd(q + int2(2, 1), size), n = FsrLd(q + int2(0, 2), size), o = FsrLd(q + int2(1, 2), size);
+    float bL = FsrLu(b), cL = FsrLu(c), eL = FsrLu(e), fL = FsrLu(f), gL = FsrLu(g), hL = FsrLu(h), iL = FsrLu(i),
+          jL = FsrLu(j), kL = FsrLu(k), lL = FsrLu(l), nL = FsrLu(n), oL = FsrLu(o);
+    float2 dir = float2(0.0, 0.0); float len = 0.0;
+    FsrEs(dir, len, (1.0 - pp.x) * (1.0 - pp.y), bL, eL, fL, gL, jL);
+    FsrEs(dir, len, pp.x * (1.0 - pp.y), cL, fL, gL, hL, kL);
+    FsrEs(dir, len, (1.0 - pp.x) * pp.y, fL, iL, jL, kL, nL);
+    FsrEs(dir, len, pp.x * pp.y, gL, jL, kL, lL, oL);
+    float dr = dot(dir, dir); bool z = dr < 1.0 / 32768.0;
+    dr = z ? 1.0 : rsqrt(dr); dir.x = z ? 1.0 : dir.x; dir *= dr;
+    len = len * 0.5; len *= len;
+    float st = dot(dir, dir) / max(abs(dir.x), abs(dir.y));
+    float2 len2 = float2(1.0 + (st - 1.0) * len, 1.0 - 0.5 * len);
+    float lob = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len; float clp = 1.0 / lob;
+    float3 ac = float3(0.0, 0.0, 0.0); float aw = 0.0;
+    FsrEt(ac, aw, float2(0.0, -1.0) - pp, dir, len2, lob, clp, b); FsrEt(ac, aw, float2(1.0, -1.0) - pp, dir, len2, lob, clp, c);
+    FsrEt(ac, aw, float2(-1.0, 1.0) - pp, dir, len2, lob, clp, i); FsrEt(ac, aw, float2(0.0, 1.0) - pp, dir, len2, lob, clp, j);
+    FsrEt(ac, aw, float2(0.0, 0.0) - pp, dir, len2, lob, clp, f); FsrEt(ac, aw, float2(-1.0, 0.0) - pp, dir, len2, lob, clp, e);
+    FsrEt(ac, aw, float2(1.0, 1.0) - pp, dir, len2, lob, clp, k); FsrEt(ac, aw, float2(2.0, 1.0) - pp, dir, len2, lob, clp, l);
+    FsrEt(ac, aw, float2(2.0, 0.0) - pp, dir, len2, lob, clp, h); FsrEt(ac, aw, float2(1.0, 0.0) - pp, dir, len2, lob, clp, g);
+    FsrEt(ac, aw, float2(1.0, 2.0) - pp, dir, len2, lob, clp, o); FsrEt(ac, aw, float2(0.0, 2.0) - pp, dir, len2, lob, clp, n);
+    float3 mn = min(min(f, g), min(j, k)), mx = max(max(f, g), max(j, k));
+    return min(mx, max(mn, ac / aw));
+}
+
 float4 PresentPS(PresentVertexOutput i) : SV_TARGET {
+    if (PresentMode == 2u) return float4(FsrEasu(i.uv), 1.0);
     return CloudTexture0.SampleLevel(CloudSampler, i.uv, 0.0);
 }
 

@@ -1919,7 +1919,7 @@ bool ensure_swapchain(Dx12GeState &s, std::string &error) noexcept {
 
 std::uint32_t present_sampler(Dx12GeState &s) noexcept {
     GeGpuDrawDescriptor draw{};
-    const bool linear = vcs_configuration().display.upscale_filter == DisplayUpscaleFilter::Bilinear;
+    const bool linear = vcs_configuration().display.upscale_filter != DisplayUpscaleFilter::Nearest;
     draw.texture_min_linear = linear;
     draw.texture_mag_linear = linear;
     draw.texture_clamp_u = true;
@@ -2477,6 +2477,9 @@ bool record_direct_present(Dx12GeState &s, Dx12FramebufferTarget &source,
     struct LegacyCloudPresentConstants { std::array<std::uint32_t, 16> zero{}; } clouds{};
     std::array<std::uint32_t, 21> present_constants{};
     std::memcpy(present_constants.data() + 5u, &clouds, sizeof(clouds));
+    // PresentState.PresentMode (b1, first DWORD): 2 = FSR 1.0 EASU when the frame is enlarged to the window.
+    const bool enlarged = rect.width > static_cast<int>(s.target_width) || rect.height > static_cast<int>(s.target_height);
+    present_constants[0] = vcs_configuration().display.upscale_filter == DisplayUpscaleFilter::Fsr && enlarged ? 2u : 0u;
     s.list->SetGraphicsRoot32BitConstants(
         3u, static_cast<UINT>(present_constants.size()), present_constants.data(), 0u);
     s.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);

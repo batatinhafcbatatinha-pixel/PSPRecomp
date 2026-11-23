@@ -277,8 +277,10 @@ void apply_display_key(VcsConfiguration &config, const std::string &key,
             config.display.upscale_filter = DisplayUpscaleFilter::Nearest;
         else if (filter == "bilinear" || filter == "linear" || filter == "smooth")
             config.display.upscale_filter = DisplayUpscaleFilter::Bilinear;
+        else if (filter == "fsr" || filter == "fsr1" || filter == "amd")
+            config.display.upscale_filter = DisplayUpscaleFilter::Fsr;
         else
-            warning(config, line, "Display.UpscaleFilter expects Nearest or Bilinear");
+            warning(config, line, "Display.UpscaleFilter expects Nearest, Bilinear or FSR");
         return;
     }
     if (key == "integerscale") {
@@ -827,6 +829,7 @@ const char *display_upscale_filter_name(DisplayUpscaleFilter filter) noexcept {
     switch (filter) {
     case DisplayUpscaleFilter::Nearest: return "Nearest";
     case DisplayUpscaleFilter::Bilinear: return "Bilinear";
+    case DisplayUpscaleFilter::Fsr: return "FSR 1.0";
     }
     return "Unknown";
 }

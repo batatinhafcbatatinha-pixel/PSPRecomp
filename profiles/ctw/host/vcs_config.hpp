@@ -21,6 +21,7 @@ enum class DisplayAspectMode : std::uint8_t {
 enum class DisplayUpscaleFilter : std::uint8_t {
     Nearest,
     Bilinear,
+    Fsr,   // AMD FidelityFX Super Resolution 1.0 (EASU) when the frame is smaller than the window
 };
 
 enum class InternalResolutionMode : std::uint8_t {
