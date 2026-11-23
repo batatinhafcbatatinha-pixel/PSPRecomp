@@ -1,5 +1,6 @@
 #include "dx12_presenter.hpp"
 #include "vcs_runtime_log.hpp"
+#include "vcs_config.hpp"
 
 #include <algorithm>
 #include <array>
@@ -203,6 +204,20 @@ void release_backbuffers(PresenterState &s) noexcept {
 }
 
 [[nodiscard]] bool select_adapter(PresenterState &s, std::string &error) noexcept {
+    if (const int wanted = vcs::vcs_configuration().display.adapter; wanted >= 0) {
+        ComPtr<IDXGIAdapter1> chosen;
+        if (SUCCEEDED(s.factory->EnumAdapters1(static_cast<UINT>(wanted), &chosen)) &&
+            SUCCEEDED(D3D12CreateDevice(chosen.Get(), D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), nullptr))) {
+            DXGI_ADAPTER_DESC1 desc{};
+            chosen->GetDesc1(&desc);
+            char utf8[512]{};
+            const int count = WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, utf8, static_cast<int>(sizeof(utf8)), nullptr, nullptr);
+            s.adapter = chosen;
+            s.adapter_name = count > 0 ? utf8 : "Direct3D 12 adapter";
+            s.hardware_adapter = true;
+            return true;
+        }
+    }
     ComPtr<IDXGIAdapter1> fallback;
     for (UINT index = 0u;; ++index) {
         ComPtr<IDXGIAdapter1> candidate;
@@ -684,8 +699,10 @@ bool dx12_presenter_present_rgba(std::span<const std::byte> rgba,
     ID3D12CommandList *lists[]{s.command_list.Get()};
     s.queue->ExecuteCommandLists(1u, lists);
 
-    const UINT present_flags = s.tearing_supported ? DXGI_PRESENT_ALLOW_TEARING : 0u;
-    hr = s.swapchain->Present(0u, present_flags);
+    // VSync: wait for the refresh (tearing cannot be asked for then).
+    const bool vsync = vcs::vcs_configuration().display.vsync;
+    const UINT present_flags = !vsync && s.tearing_supported ? DXGI_PRESENT_ALLOW_TEARING : 0u;
+    hr = s.swapchain->Present(vsync ? 1u : 0u, present_flags);
     if (FAILED(hr)) {
         std::ostringstream out;
         out << hr_text(hr, "IDXGISwapChain::Present");

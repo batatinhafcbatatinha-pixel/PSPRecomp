@@ -288,6 +288,20 @@ void apply_display_key(VcsConfiguration &config, const std::string &key,
             warning(config, line, "Display.IntegerScale expects true/false");
         return;
     }
+    if (key == "vsync" || key == "verticalsync") {
+        if (!parse_bool(value, config.display.vsync))
+            warning(config, line, "Display.VSync expects true/false");
+        return;
+    }
+    if (key == "adapter" || key == "gpu") {
+        char *end = nullptr;
+        const long index = std::strtol(trim_copy(value).c_str(), &end, 10);
+        if (end == nullptr || *end != 0 || index < -1 || index > 64)
+            warning(config, line, "Display.Adapter expects -1 (automatic) or a GPU index");
+        else
+            config.display.adapter = static_cast<int>(index);
+        return;
+    }
     if (key == "showfps" || key == "fpscounter") {
         if (!parse_bool(value, config.display.show_fps))
             warning(config, line, "Display.ShowFPS expects true/false");

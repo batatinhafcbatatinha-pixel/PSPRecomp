@@ -51,6 +51,10 @@ struct DisplayConfiguration {
     // time (30 is full speed), rather than merely echoing the PSP's 60 Hz
     // vblank clock.
     bool show_fps{false};
+    // Wait for the monitor's refresh before showing a frame (no tearing, frame rate capped at the refresh).
+    bool vsync{false};
+    // DXGI adapter index (IDXGIFactory1::EnumAdapters1, the launcher's GPU list); -1 = the fastest one.
+    int adapter{-1};
 };
 
 struct PresentationRectangle {

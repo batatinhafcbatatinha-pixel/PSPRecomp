@@ -243,7 +243,10 @@ int main(int argc, char **argv) {
                   << vcs::display_resolution_mode_name(configuration.display.resolution_mode)
                   << " / " << vcs::display_aspect_mode_name(configuration.display.aspect_mode)
                   << " / " << vcs::display_upscale_filter_name(configuration.display.upscale_filter)
-                  << (configuration.display.fullscreen ? " / fullscreen" : " / windowed") << "\n";
+                  << (configuration.display.fullscreen ? " / fullscreen" : " / windowed")
+                  << (configuration.display.vsync ? " / vsync" : " / no vsync")
+                  << (configuration.display.adapter >= 0 ? " / GPU " + std::to_string(configuration.display.adapter) : std::string())
+                  << "\n";
         const vcs::InternalResolutionDimensions internal_resolution =
             vcs::resolve_internal_resolution(configuration.rendering);
         std::cout << "Rendering backend:    "

@@ -217,6 +217,95 @@
                   "word": "true"
                 }
               ]
+            },
+            {
+              "key": "VSync",
+              "pt": "Sincronia vertical (vsync)",
+              "en": "Vertical sync (vsync)",
+              "default": 0,
+              "restart": true,
+              "help_pt": "Sem cortes na imagem; o FPS fica limitado à taxa do monitor.",
+              "help_en": "No tearing; the frame rate is capped at the monitor's refresh.",
+              "choices": [
+                {
+                  "v": 0,
+                  "pt": "Desligado",
+                  "en": "Off",
+                  "word": "false"
+                },
+                {
+                  "v": 1,
+                  "pt": "Ligado",
+                  "en": "On",
+                  "word": "true"
+                }
+              ]
+            },
+            {
+              "key": "Adapter",
+              "pt": "Placa de vídeo",
+              "en": "Graphics card",
+              "default": -1,
+              "restart": true,
+              "source": "gpus",
+              "help_pt": "Em notebooks com duas, escolha a dedicada.",
+              "help_en": "On laptops with two, pick the dedicated one."
+            },
+            {
+              "key": "MSAA",
+              "section": "Rendering",
+              "pt": "Antisserrilhado MSAA",
+              "en": "MSAA anti-aliasing",
+              "default": 1,
+              "restart": true,
+              "help_pt": "Suaviza bordas; 4x e 8x pesam mais.",
+              "help_en": "Smooths edges; 4x and 8x cost more.",
+              "choices": [
+                {
+                  "v": 1,
+                  "pt": "Desligado",
+                  "en": "Off"
+                },
+                {
+                  "v": 2,
+                  "pt": "2x",
+                  "en": "2x"
+                },
+                {
+                  "v": 4,
+                  "pt": "4x",
+                  "en": "4x"
+                },
+                {
+                  "v": 8,
+                  "pt": "8x",
+                  "en": "8x"
+                }
+              ]
+            },
+            {
+              "key": "SMAA",
+              "section": "Rendering",
+              "pt": "Antisserrilhado SMAA",
+              "en": "SMAA anti-aliasing",
+              "default": 0,
+              "restart": true,
+              "help_pt": "Pós-processamento leve, parecido com o FXAA.",
+              "help_en": "Light post-process, similar to FXAA.",
+              "choices": [
+                {
+                  "v": 0,
+                  "pt": "Desligado",
+                  "en": "Off",
+                  "word": "false"
+                },
+                {
+                  "v": 1,
+                  "pt": "Ligado",
+                  "en": "On",
+                  "word": "true"
+                }
+              ]
             }
           ]
         }
