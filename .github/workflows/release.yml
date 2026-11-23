@@ -65,6 +65,8 @@ jobs:
       matrix:
         include:
           - { platform: windows, os: windows-latest }
+          - { platform: linux, os: ubuntu-latest }
+          - { platform: macos, os: ubuntu-latest }
     runs-on: ${{ matrix.os }}
     steps:
       # Text files as the platform expects them: CRLF in the Windows ZIP, LF in the others (.gitattributes wins).
@@ -121,7 +123,7 @@ jobs:
             esac
           done
           notes="$NAME built from the source of commit $GITHUB_SHA.
-          PSPRecomp-windows.zip: the source and Launcher.exe (PSPRecomp builds on Windows only, so there is no Linux or macOS ZIP).
+          PSPRecomp-windows.zip: the source and Launcher.exe. PSPRecomp-linux.zip / PSPRecomp-macos.zip: the same source with LF line endings and no launcher (it is a Windows program); build as docs/LINUX_MACOS.md describes (software renderer; compiled in CI, never run with a game).
           Unzip and keep the folder; the Windows ZIP has Launcher.exe at its root, next to launcher.json.
           Source code and configuration only: no game data, no generated game code. The game always comes from your own disc.
 
