@@ -9064,7 +9064,14 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             // game list shows the modification time, so leaving these zero put
             // every save in the year zero.
             const auto written = std::filesystem::last_write_time(native, error);
+#if defined(_WIN32)
             const auto system_time = std::chrono::clock_cast<std::chrono::system_clock>(written);
+#else
+            // libc++ and older libstdc++ have no clock_cast: shift by the current offset between the two clocks.
+            const auto system_time = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                std::chrono::system_clock::now() + std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                    written - std::filesystem::file_time_type::clock::now()));
+#endif
             const std::time_t seconds = std::chrono::system_clock::to_time_t(system_time);
             std::tm parts{};
 #if defined(_WIN32)
