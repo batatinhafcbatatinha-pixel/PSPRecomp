@@ -279,13 +279,21 @@ void apply_display_key(VcsConfiguration &config, const std::string &key,
             config.display.upscale_filter = DisplayUpscaleFilter::Bilinear;
         else if (filter == "fsr" || filter == "fsr1" || filter == "amd")
             config.display.upscale_filter = DisplayUpscaleFilter::Fsr;
+        else if (filter == "dlss" || filter == "nvidia")
+            config.display.upscale_filter = DisplayUpscaleFilter::Dlss;
         else
-            warning(config, line, "Display.UpscaleFilter expects Nearest, Bilinear or FSR");
+            warning(config, line, "Display.UpscaleFilter expects Nearest, Bilinear, FSR or DLSS");
         return;
     }
     if (key == "integerscale") {
         if (!parse_bool(value, config.display.integer_scale))
             warning(config, line, "Display.IntegerScale expects true/false");
+        return;
+    }
+    if (key == "dlssquality") {
+        const std::string q = lowercase_copy(trim_copy(value));
+        config.display.dlss_quality = q == "performance" ? 0 : q == "balanced" ? 1 : q == "ultraperformance" ? 3
+                                    : q == "dlaa" ? 5 : 2;
         return;
     }
     if (key == "vsync" || key == "verticalsync") {
@@ -848,6 +856,7 @@ const char *display_upscale_filter_name(DisplayUpscaleFilter filter) noexcept {
     case DisplayUpscaleFilter::Nearest: return "Nearest";
     case DisplayUpscaleFilter::Bilinear: return "Bilinear";
     case DisplayUpscaleFilter::Fsr: return "FSR 1.0";
+    case DisplayUpscaleFilter::Dlss: return "DLSS";
     }
     return "Unknown";
 }

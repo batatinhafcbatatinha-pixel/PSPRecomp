@@ -70,6 +70,12 @@ if(WIN32)
     target_compile_definitions(PSPNative PRIVATE PSP_PORT_INPUT=1)
     include("${GENERIC_PORT_INPUT}/port_input.cmake")
     port_input_stage(PSPNative)
+    # port_dlss (third_party/port_gfx): UpscaleFilter=DLSS in the DX12 present pass. C, built as C++ here.
+    set(GENERIC_PORT_GFX "${CMAKE_CURRENT_LIST_DIR}/../../third_party/port_gfx")
+    target_sources(PSPNative PRIVATE "${GENERIC_PORT_GFX}/port_dlss.c")
+    set_source_files_properties("${GENERIC_PORT_GFX}/port_dlss.c" PROPERTIES LANGUAGE CXX)
+    target_include_directories(PSPNative PRIVATE "${GENERIC_PORT_GFX}")
+    target_compile_definitions(PSPNative PRIVATE PORT_DLSS=1)
 endif()
 psprecomp_enable_host_avx(PSPNative)
 

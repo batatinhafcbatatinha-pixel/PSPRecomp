@@ -22,6 +22,7 @@ enum class DisplayUpscaleFilter : std::uint8_t {
     Nearest,
     Bilinear,
     Fsr,   // AMD FidelityFX Super Resolution 1.0 (EASU) when the frame is smaller than the window
+    Dlss,  // NVIDIA DLSS (RTX cards, port_dlss); FSR when it cannot run
 };
 
 enum class InternalResolutionMode : std::uint8_t {
@@ -55,6 +56,8 @@ struct DisplayConfiguration {
     bool vsync{false};
     // DXGI adapter index (IDXGIFactory1::EnumAdapters1, the launcher's GPU list); -1 = the fastest one.
     int adapter{-1};
+    // NVIDIA's DLSS preset with UpscaleFilter=DLSS: 0 performance, 1 balanced, 2 quality, 3 ultra performance, 5 DLAA.
+    int dlss_quality{2};
 };
 
 struct PresentationRectangle {

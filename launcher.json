@@ -150,6 +150,55 @@
                   "pt": "AMD FSR 1.0",
                   "en": "AMD FSR 1.0",
                   "word": "FSR"
+                },
+                {
+                  "v": 3,
+                  "pt": "NVIDIA DLSS (placas RTX)",
+                  "en": "NVIDIA DLSS (RTX cards)",
+                  "word": "DLSS"
+                }
+              ],
+              "help_pt": "DLSS precisa de placa NVIDIA RTX; sem ela, usa o FSR.",
+              "help_en": "DLSS needs an NVIDIA RTX card; without one, FSR is used."
+            },
+            {
+              "key": "DlssQuality",
+              "pt": "Qualidade do DLSS",
+              "en": "DLSS quality",
+              "default": 2,
+              "restart": true,
+              "help_pt": "Usado com DLSS. DLAA não amplia: só suaviza bordas na resolução da tela.",
+              "help_en": "Used with DLSS. DLAA does not enlarge: it only smooths edges at the screen's resolution.",
+              "choices": [
+                {
+                  "v": 0,
+                  "pt": "Desempenho",
+                  "en": "Performance",
+                  "word": "Performance"
+                },
+                {
+                  "v": 1,
+                  "pt": "Equilibrado",
+                  "en": "Balanced",
+                  "word": "Balanced"
+                },
+                {
+                  "v": 2,
+                  "pt": "Qualidade",
+                  "en": "Quality",
+                  "word": "Quality"
+                },
+                {
+                  "v": 3,
+                  "pt": "Ultra desempenho",
+                  "en": "Ultra performance",
+                  "word": "UltraPerformance"
+                },
+                {
+                  "v": 5,
+                  "pt": "DLAA",
+                  "en": "DLAA",
+                  "word": "DLAA"
                 }
               ]
             },

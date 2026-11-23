@@ -3,6 +3,9 @@
 #include "ge_cloudworks_present_shader.hpp"
 #include "vcs_config.hpp"
 #include "vcs_runtime_log.hpp"
+#ifdef PORT_DLSS
+#include "port_dlss.h"   // UpscaleFilter=DLSS (third_party/port_gfx)
+#endif
 
 #include <algorithm>
 #include <array>
@@ -261,6 +264,11 @@ struct Dx12GeState {
     UINT next_rtv{};
     UINT next_dsv{};
     UINT next_srv{1u};
+    // UpscaleFilter=DLSS: DLSS's output (UAV, sampled by the present pass) and zero-filled depth and motion inputs at
+    // the render size (the renderer has no motion vectors; DLSS then treats the picture as still).
+    ComPtr<ID3D12Resource> dlss_output, dlss_depth, dlss_motion;
+    std::uint32_t dlss_srv{}, dlss_out_w{}, dlss_out_h{}, dlss_in_w{}, dlss_in_h{};
+    bool dlss_reset{true};
     UINT next_sampler{1u};
     std::unordered_map<std::uint32_t, Dx12FramebufferTarget> frame_targets;
     ComPtr<ID3D12Resource> readback_buffer;
@@ -2462,6 +2470,68 @@ bool record_direct_present(Dx12GeState &s, Dx12FramebufferTarget &source,
     const UINT index = s.swapchain->GetCurrentBackBufferIndex();
     ID3D12Resource *backbuffer = s.backbuffers[index].Get();
     resolve_target_for_sampling(s, source, false);
+    std::uint32_t present_srv = source.srv_index;
+    bool dlss_done = false;
+#ifdef PORT_DLSS
+    if (vcs_configuration().display.upscale_filter == DisplayUpscaleFilter::Dlss && port_dlss_ready()) {
+        const PresentationRectangle area = calculate_presentation_rectangle(
+            s.swap_width, s.swap_height, s.target_width, s.target_height,
+            vcs_configuration().display.aspect_mode, vcs_configuration().display.integer_scale);
+        const std::uint32_t tw = s.target_width, th = s.target_height;
+        if (area.width > static_cast<int>(tw) || area.height > static_cast<int>(th)) {
+            // DLSS enlarges at most 3x per axis; the present pass enlarges the rest bilinearly.
+            const std::uint32_t ow = std::min<std::uint32_t>(static_cast<std::uint32_t>(area.width), tw * 3u);
+            const std::uint32_t oh = std::min<std::uint32_t>(static_cast<std::uint32_t>(area.height), th * 3u);
+            const D3D12_RESOURCE_STATES read = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            bool ready = true;
+            D3D12_HEAP_PROPERTIES heap{};
+            heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+            auto make = [&](ComPtr<ID3D12Resource> &out, DXGI_FORMAT format, std::uint32_t w, std::uint32_t h,
+                            D3D12_RESOURCE_FLAGS flags) {
+                D3D12_RESOURCE_DESC desc{};
+                desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                desc.Width = w; desc.Height = h; desc.DepthOrArraySize = 1u; desc.MipLevels = 1u;
+                desc.Format = format; desc.SampleDesc.Count = 1u; desc.Flags = flags;
+                out.Reset();
+                // Committed resources start zeroed: the stand-in depth and motion need no clear.
+                return SUCCEEDED(s.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, read,
+                                                                   nullptr, IID_PPV_ARGS(&out)));
+            };
+            if (s.dlss_out_w != ow || s.dlss_out_h != oh || s.dlss_in_w != tw || s.dlss_in_h != th) {
+                std::string ignored;
+                (void)wait_for_gpu(s, ignored);   // the old output may still be sampled by a frame in flight
+                ready = make(s.dlss_output, kColorFormat, ow, oh, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) &&
+                        make(s.dlss_depth, DXGI_FORMAT_R32_FLOAT, tw, th, D3D12_RESOURCE_FLAG_NONE) &&
+                        make(s.dlss_motion, DXGI_FORMAT_R16G16_FLOAT, tw, th, D3D12_RESOURCE_FLAG_NONE);
+                if (ready) {
+                    if (s.dlss_srv == 0u) s.dlss_srv = allocate_texture_srv(s);
+                    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+                    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    view.Format = kColorFormat;
+                    view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                    view.Texture2D.MipLevels = 1u;
+                    s.device->CreateShaderResourceView(s.dlss_output.Get(), &view, srv_cpu(s, s.dlss_srv));
+                    s.dlss_out_w = ow; s.dlss_out_h = oh; s.dlss_in_w = tw; s.dlss_in_h = th;
+                    s.dlss_reset = true;
+                } else {
+                    s.dlss_out_w = s.dlss_out_h = 0u;
+                }
+            }
+            if (ready && s.dlss_srv != 0u) {
+                transition(s.list.Get(), source.color.Get(), source.color_state, read);
+                transition(s.list.Get(), s.dlss_output.Get(), read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                dlss_done = port_dlss_d3d12_evaluate(s.list.Get(), source.color.Get(), s.dlss_depth.Get(),
+                                                     s.dlss_motion.Get(), s.dlss_output.Get(), tw, th, ow, oh,
+                                                     vcs_configuration().display.dlss_quality, 0.0f, 0.0f,
+                                                     s.dlss_reset ? 1 : 0) != 0;
+                transition(s.list.Get(), s.dlss_output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read);
+                transition(s.list.Get(), source.color.Get(), read, source.color_state);
+                if (dlss_done) { present_srv = s.dlss_srv; s.dlss_reset = false; }
+            }
+        }
+    }
+#endif
     transition(s.list.Get(), backbuffer, D3D12_RESOURCE_STATE_PRESENT,
                D3D12_RESOURCE_STATE_RENDER_TARGET);
     const D3D12_CPU_DESCRIPTOR_HANDLE rtv = swap_rtv(s, index);
@@ -2482,7 +2552,7 @@ bool record_direct_present(Dx12GeState &s, Dx12FramebufferTarget &source,
     s.list->SetGraphicsRootSignature(s.root_signature.Get());
     ID3D12DescriptorHeap *heaps[]{s.srv_heap.Get(), s.sampler_heap.Get()};
     s.list->SetDescriptorHeaps(2u, heaps);
-    s.list->SetGraphicsRootDescriptorTable(0u, srv_gpu(s, source.srv_index));
+    s.list->SetGraphicsRootDescriptorTable(0u, srv_gpu(s, present_srv));
     s.list->SetGraphicsRootDescriptorTable(1u, sampler_gpu(s, present_sampler(s)));
     // Clouds are rendered into the selected 3D world target before VCS samples
     // it for composition. Applying them here would mix world-camera rays with
@@ -2492,7 +2562,10 @@ bool record_direct_present(Dx12GeState &s, Dx12FramebufferTarget &source,
     std::memcpy(present_constants.data() + 5u, &clouds, sizeof(clouds));
     // PresentState.PresentMode (b1, first DWORD): 2 = FSR 1.0 EASU when the frame is enlarged to the window.
     const bool enlarged = rect.width > static_cast<int>(s.target_width) || rect.height > static_cast<int>(s.target_height);
-    present_constants[0] = vcs_configuration().display.upscale_filter == DisplayUpscaleFilter::Fsr && enlarged ? 2u : 0u;
+    // DLSS falls back to FSR when it cannot run; after DLSS the present pass only fits its output to the window.
+    const DisplayUpscaleFilter filter = vcs_configuration().display.upscale_filter;
+    present_constants[0] = !dlss_done && (filter == DisplayUpscaleFilter::Fsr || filter == DisplayUpscaleFilter::Dlss) &&
+                           enlarged ? 2u : 0u;
     s.list->SetGraphicsRoot32BitConstants(
         3u, static_cast<UINT>(present_constants.size()), present_constants.data(), 0u);
     s.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -2908,6 +2981,15 @@ bool create_backend(Dx12GeState &s, std::string &error) noexcept {
     hr = D3D12CreateDevice(s.adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&s.device));
     if (FAILED(hr)) { error = hr_text(hr, "D3D12CreateDevice(DX12 GE)"); return false; }
     select_depth_and_msaa(s);
+#ifdef PORT_DLSS
+    if (vcs_configuration().display.upscale_filter == DisplayUpscaleFilter::Dlss) {
+        if (port_dlss_d3d12_start(s.device.Get()))
+            runtime_log_line("DLSS ready (NVIDIA NGX, quality preset " +
+                             std::to_string(vcs_configuration().display.dlss_quality) + ")");
+        else
+            runtime_log_line(std::string("DLSS unavailable: ") + port_dlss_error() + "; using FSR 1.0");
+    }
+#endif
     D3D12_COMMAND_QUEUE_DESC queue_desc{};
     queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     hr = s.device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&s.queue));
@@ -2998,6 +3080,11 @@ bool create_backend(Dx12GeState &s, std::string &error) noexcept {
 void destroy_backend(Dx12GeState &s) noexcept {
     std::string ignored;
     if (s.queue && s.fence) (void)wait_for_gpu(s, ignored);
+#ifdef PORT_DLSS
+    port_dlss_d3d12_stop();
+    s.dlss_output.Reset(); s.dlss_depth.Reset(); s.dlss_motion.Reset();
+    s.dlss_out_w = s.dlss_out_h = s.dlss_in_w = s.dlss_in_h = 0u;
+#endif
     for (Dx12FrameResources &frame : s.frames) {
         if (frame.upload_buffer && frame.mapped_upload != nullptr)
             frame.upload_buffer->Unmap(0u, nullptr);

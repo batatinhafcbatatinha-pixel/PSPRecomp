@@ -225,7 +225,10 @@ def step_play(port, args):
     except configparser.Error:
         pass
     api = ini.get('Rendering', 'GraphicsApi', fallback='Native').strip().lower()
-    vulkan_layer.stage(port.exe.parent, 'd3d12', api == 'vulkan', Path(__file__).resolve().parents[2] / '.local/downloads/vulkan')
+    cache = Path(__file__).resolve().parents[2] / '.local/downloads/vulkan'
+    vulkan_layer.stage(port.exe.parent, 'd3d12', api == 'vulkan', cache)
+    # [Display] UpscaleFilter=DLSS: NVIDIA's network next to the game (port_dlss).
+    vulkan_layer.stage_dlss(port.exe.parent, ini.get('Display', 'UpscaleFilter', fallback='').strip().lower() == 'dlss', cache)
     r = subprocess.run([str(port.exe), str(port.eboot), str(port.files)], cwd=port.exe.parent, env=env)
     sys.exit(r.returncode)
 
